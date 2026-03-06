@@ -1,0 +1,34 @@
+# Sensitive data
+.env
+.env.local
+.env.*.local
+
+# User Requested Exclusions
+/reference
+/tests
+test_*.py
+test_sse.py
+test_tool_loop.py
+test_out*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.log
+
+# Frontend (Next.js)
+node_modules/
+.next/
+out/
+build/
+.DS_Store
+
+# Local Agent Data
+workspace/
+memory/
+profiles/
+.tasks/

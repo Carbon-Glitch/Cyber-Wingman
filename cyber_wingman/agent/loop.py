@@ -1,0 +1,702 @@
+"""
+核心 Agent Loop — 赛博僚机的引擎。
+
+融合 learn-claude-code s01 循环哲学 + nanobot 生产实现：
+
+    while iteration < max_iterations:
+        response = await provider.chat(messages, tools)
+        if response.has_tool_calls:
+            execute tools → append results → loop
+        else:
+            return final response
+
+四阶段增强循环：
+1. Context 构建（七层并行）
+2. LLM 推理（选择工具 / 直接回复 / 生成 SubAgent）
+3. 工具执行 + 结果反馈
+4. 异步后处理（记忆整合 + Context 压缩）
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+from collections import deque
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Awaitable, Callable
+
+from loguru import logger
+
+from cyber_wingman.agent.compact import (
+    DEFAULT_TOKEN_THRESHOLD,
+    auto_compact,
+    estimate_tokens,
+    micro_compact,
+)
+from cyber_wingman.agent.context import ContextBuilder
+from cyber_wingman.agent.intent_detector import IntentDetector
+from cyber_wingman.agent.memory import MemoryStore
+from cyber_wingman.agent.tools.ask import AskUserTool
+from cyber_wingman.agent.tools.base import Tool
+from cyber_wingman.agent.tools.emotion import EmotionAnalysisTool
+from cyber_wingman.agent.tools.ideal_type_test import IdealTypeTestTool
+from cyber_wingman.agent.tools.knowledge_search import KnowledgeSearchTool
+from cyber_wingman.agent.tools.registry import ToolRegistry
+from cyber_wingman.agent.tools.reply_generator import ReplyGeneratorTool
+from cyber_wingman.agent.tools.subagent import SpawnSubagentTool
+from cyber_wingman.agent.tools.task_manager import (
+    TaskCreateTool,
+    TaskGetTool,
+    TaskListTool,
+    TaskUpdateTool,
+)
+from cyber_wingman.agent.tools.time import TimeAwarenessTool
+from cyber_wingman.agent.tools.visualizer import DataVisualizerTool
+from cyber_wingman.agent.tools.web import DatePlanningSearchTool, WebFetchTool, WebSearchTool
+from cyber_wingman.agent.user_profile import UserProfile
+from cyber_wingman.providers.base import LLMProvider
+from cyber_wingman.session.manager import Session, SessionManager
+
+# 记忆整合阈値：每当新增消息超过此数就异步触发一次整合
+CONSOLIDATION_THRESHOLD = 10
+# LLM 失败重试间隔 (s)
+_RETRY_DELAYS = (1.0, 2.0, 4.0)
+
+
+# 工具名称 → 可读步骤文本模板
+_TOOL_ACTION_TEMPLATES: dict[str, str] = {
+    "web_search": "搜索互联网: {query}",
+    "date_planning_search": "搜索约会地点: {city} {theme}",
+    "web_fetch": "访问网页: {url}",
+    "emotion_analysis": "分析情绪和蒸气",
+    "reply_generator": "生成回复话术方案",
+    "knowledge_search": "搜索知识库: {query}",
+    "ideal_type_test": "进行理想型测试问题",
+    "load_skill": "加载技能: {name}",
+    "spawn_subagent": "启动子代理: {task}",
+    "compact": "压缩对话上下文",
+    "time_awareness": "核对时间感知或日程: {offset_days}天",
+    "data_visualizer": "生成雷达数据或健康图表",
+    "ask_user": "向用户询问信息: {question}",
+    "task_create": "创建长期任务架构: {description}",
+    "task_update": "更新任务节点状态: {task_id}",
+    "task_list": "检视所有任务线状图",
+    "task_get": "获取具体子任务内容: {task_id}",
+}
+
+
+def _make_step_text(tool_name: str, args: dict[str, Any]) -> str:
+    """生成可读的步骤文本，用于祭出 SSE step_announce 事件。"""
+    template = _TOOL_ACTION_TEMPLATES.get(tool_name)
+    if template:
+        try:
+            # 只填充模板中实际存在的展占位符
+            import string
+            keys = [f for _, f, _, _ in string.Formatter().parse(template) if f]
+            fill = {k: str(args.get(k, ""))[:30] for k in keys}
+            return template.format(**fill).strip(" :")
+        except (KeyError, ValueError):
+            pass
+    # 默认：将工具名转为可读文本
+    readable = tool_name.replace("_", " ")
+    first_val = next(iter(args.values()), "") if args else ""
+    suffix = f": {str(first_val)[:40]}" if first_val else ""
+    return f"{readable}{suffix}"
+
+# ── 内置工具（正确继承 Tool ABC）────────────────────────────────
+
+
+class LoadSkillTool(Tool):
+    """load_skill 工具 — 按需加载技能详细内容 (Layer 2)。"""
+
+    def __init__(self, skills_loader: Any) -> None:
+        self._loader = skills_loader
+
+    @property
+    def name(self) -> str:
+        return "load_skill"
+
+    @property
+    def description(self) -> str:
+        return "按名称加载技能的完整说明。在处理不熟悉的任务前使用此工具获取专业知识。"
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "技能名称（从可用技能列表中选择）",
+                },
+            },
+            "required": ["name"],
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        skill_name = kwargs.get("name", "")
+        context = kwargs.get("_context", {})
+        on_progress = context.get("_on_progress")
+
+        if on_progress:
+            # 向前端发射 UI 事件，让主动调用的 Tool 也能触发紫色 Badge
+            await on_progress(
+                f"正在加载技能: {skill_name}",
+                event_type="skill_activated",
+                skill_names=[skill_name],
+            )
+
+        return self._loader.get_skill_content(skill_name)
+
+
+class CompactTool(Tool):
+    """compact 工具 — 手动触发 Context 压缩 (Layer 3)。"""
+
+    @property
+    def name(self) -> str:
+        return "compact"
+
+    @property
+    def description(self) -> str:
+        return (
+            "手动压缩对话上下文。当对话过长、需要清理历史时使用。"
+            "压缩后保留关键信息的摘要，释放上下文空间。"
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "focus": {
+                    "type": "string",
+                    "description": "希望在摘要中保留的重点内容",
+                },
+            },
+        }
+
+    async def execute(self, **kwargs: Any) -> str:
+        return "手动压缩已请求。"
+
+
+# ── AgentLoop 主引擎 ────────────────────────────────────────────
+
+
+class AgentLoop:
+    """
+    赛博僚机核心引擎。
+
+    职责:
+    1. 接收用户消息
+    2. 构建七层 Context
+    3. 调用 LLM
+    4. 执行工具调用
+    5. 异步后处理（记忆整合 + Context 压缩）
+    6. 返回响应
+    """
+
+    _TOOL_RESULT_MAX_CHARS = 2000
+
+    def __init__(
+        self,
+        provider: LLMProvider,
+        workspace: Path,
+        model: str | None = None,
+        max_iterations: int = 40,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        memory_window: int = 100,
+        token_threshold: int = DEFAULT_TOKEN_THRESHOLD,
+    ) -> None:
+        self.provider = provider
+        self.workspace = workspace
+        self.model = model or provider.get_default_model()
+        self.max_iterations = max_iterations
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.memory_window = memory_window
+        self.token_threshold = token_threshold
+
+        # 核心组件
+        self.context = ContextBuilder(workspace)
+        self.sessions = SessionManager(workspace)
+        self.tools = ToolRegistry()
+
+        # 记忆整合状态
+        self._consolidating: set[str] = set()
+        self._consolidation_tasks: set[asyncio.Task] = set()
+
+        # 意图检测器
+        self._intent_detector = IntentDetector()
+
+        # 用户画像管理器
+        self._user_profiles = UserProfile(workspace)
+
+        # 注册默认工具
+        self._register_default_tools()
+
+    def _register_default_tools(self) -> None:
+        """注册默认工具集 — 全部继承自 Tool ABC。"""
+        # 两性情感专用工具
+        self.tools.register(EmotionAnalysisTool())
+        self.tools.register(IdealTypeTestTool())
+        self.tools.register(ReplyGeneratorTool())
+        self.tools.register(KnowledgeSearchTool())
+
+        # 通用工具
+        self.tools.register(WebSearchTool())
+        self.tools.register(WebFetchTool())
+        self.tools.register(DatePlanningSearchTool())
+        self.tools.register(TimeAwarenessTool())
+        self.tools.register(DataVisualizerTool())
+
+        # Agent 编排工具
+        self.tools.register(LoadSkillTool(self.context.skills))
+        self.tools.register(CompactTool())
+
+        # 复杂工序编排：Subagent、反问与任务 DAG
+        self.tools.register(AskUserTool())
+        self.tools.register(SpawnSubagentTool())
+        self.tools.register(TaskCreateTool())
+        self.tools.register(TaskUpdateTool())
+        self.tools.register(TaskListTool())
+        self.tools.register(TaskGetTool())
+
+    @staticmethod
+    def _strip_think(text: str | None) -> str | None:
+        """移除模型可能输出的 <think> 块。"""
+        if not text:
+            return None
+        return re.sub(r"<think>[\s\S]*?</think>", "", text).strip() or None
+
+    async def _run_agent_loop(
+        self,
+        initial_messages: list[dict[str, Any]],
+        session: Any = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+    ) -> tuple[str | None, list[str], list[dict[str, Any]]]:
+        """
+        运行 Agent 迭代循环。
+
+        每轮迭代前执行 Layer 1 micro_compact；
+        token 超阈值时执行 Layer 2 auto_compact。
+
+        Returns:
+            (final_content, tools_used, all_messages)
+        """
+        messages = initial_messages
+        iteration = 0
+        final_content: str | None = None
+        tools_used: list[str] = []
+        manual_compact_requested = False
+        # 循环检测：记录最近 3 轮工具序列
+        recent_tool_sequences: deque[tuple[str, ...]] = deque(maxlen=3)
+        # Thoughts 收集：记录所有执行步骤，最终随 done 事件发送
+        thoughts: list[dict[str, Any]] = []
+
+        while iteration < self.max_iterations:
+            iteration += 1
+
+            # Layer 1: micro_compact (每轮静默执行)
+            micro_compact(messages)
+
+            # Layer 2: auto_compact (token 超阈值自动触发)
+            if estimate_tokens(messages) > self.token_threshold:
+                logger.info(
+                    "event=auto_compact_triggered estimated_tokens={}", estimate_tokens(messages)
+                )
+                messages = await auto_compact(
+                    messages,
+                    self.provider,
+                    self.model,
+                    transcript_dir=self.workspace / ".transcripts",
+                )
+
+            # Phase 2: LLM 推理（指数退避重试）
+            response = None
+            last_llm_error: Exception | None = None
+            for attempt, delay in enumerate([0.0, *_RETRY_DELAYS]):
+                if delay > 0:
+                    logger.warning(
+                        "event=llm_retry attempt={} delay={}s", attempt, delay
+                    )
+                    await asyncio.sleep(delay)
+                try:
+                    response = await self.provider.chat(
+                        messages=messages,
+                        tools=self.tools.get_definitions(),
+                        model=self.model,
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                    )
+                    last_llm_error = None
+                    break
+                except Exception as exc:
+                    last_llm_error = exc
+                    logger.warning(
+                        "event=llm_call_failed attempt={} error={}", attempt, str(exc)[:120]
+                    )
+
+            if response is None:
+                logger.error("LLM 调用全部重试失败 error={}", str(last_llm_error))
+                final_content = "抱歉，AI 服务暂时无法响应，请稍候重试。"
+                break
+
+            if response.has_tool_calls:
+                # 循环检测：记录当前轮工具序列
+                current_sequence = tuple(tc.name for tc in response.tool_calls)
+                recent_tool_sequences.append(current_sequence)
+                if (
+                    len(recent_tool_sequences) == 3
+                    and len(set(recent_tool_sequences)) == 1
+                ):
+                    logger.warning(
+                        "event=tool_loop_detected sequence={}", current_sequence
+                    )
+                    final_content = (
+                        "检测到工具调用循环（相同工具序列重复 3 次），已主动中断。"
+                        "请尝试换一种方式提问，或拆分任务为更小的步骤。"
+                    )
+                    break
+                # 发送 thinking 事件（如果有推理内容）
+                if on_progress and response.reasoning_content:
+                    await on_progress(
+                        response.reasoning_content[:500],
+                        event_type="thinking",
+                    )
+
+                # 发送中间文本进度
+                if on_progress:
+                    clean = self._strip_think(response.content)
+                    if clean:
+                        await on_progress(clean)
+
+                # 记录 assistant 消息
+                tool_call_dicts = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                        },
+                    }
+                    for tc in response.tool_calls
+                ]
+                messages = self.context.add_assistant_message(
+                    messages,
+                    response.content,
+                    tool_call_dicts,
+                    reasoning_content=response.reasoning_content,
+                )
+
+                # Phase 3: 工具执行
+                for tool_call in response.tool_calls:
+                    tools_used.append(tool_call.name)
+                    args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
+                    logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
+
+                    # 生成可读的 "我现在要..." 步骤文本
+                    step_text = _make_step_text(tool_call.name, tool_call.arguments)
+                    thoughts.append({
+                        "step": len(thoughts) + 1,
+                        "action": tool_call.name,
+                        "description": step_text,
+                        "args": tool_call.arguments,
+                    })
+
+                    # 发送 step_announce 事件
+                    if on_progress:
+                        await on_progress(
+                            step_text,
+                            event_type="step_announce",
+                            tool_name=tool_call.name,
+                        )
+
+                    # 发送 tool_start 事件
+                    if on_progress:
+                        await on_progress(
+                            tool_call.name,
+                            event_type="tool_start",
+                            tool_name=tool_call.name,
+                            tool_args=tool_call.arguments,
+                        )
+
+                    # Layer 3: 手动 compact 检测
+                    is_error = False
+                    if tool_call.name == "compact":
+                        manual_compact_requested = True
+                        result = "正在压缩对话..."
+                    else:
+                        result = await self.tools.execute(
+                            tool_call.name,
+                            tool_call.arguments,
+                            context={
+                                "session": session,
+                                "agent": self,
+                                "_on_progress": on_progress
+                            },
+                        )
+                        is_error = isinstance(result, str) and result.startswith("Error")
+
+                    # 发送 tool_done 事件
+                    if on_progress:
+                        await on_progress(
+                            tool_call.name,
+                            event_type="tool_done",
+                            tool_name=tool_call.name,
+                            success=not is_error,
+                        )
+
+                    messages = self.context.add_tool_result(
+                        messages, tool_call.id, tool_call.name, result
+                    )
+
+                # Layer 3: 手动 compact 执行
+                if manual_compact_requested:
+                    logger.info("event=manual_compact_triggered")
+                    messages = await auto_compact(
+                        messages,
+                        self.provider,
+                        self.model,
+                        transcript_dir=self.workspace / ".transcripts",
+                    )
+                    manual_compact_requested = False
+
+            else:
+                # 直接回复，循环结束
+                clean = self._strip_think(response.content)
+                if response.finish_reason == "error":
+                    logger.error("LLM 返回错误: {}", (clean or "")[:200])
+                    final_content = clean or "抱歉，调用 AI 模型时遇到错误。"
+                    break
+                messages = self.context.add_assistant_message(
+                    messages,
+                    clean,
+                    reasoning_content=response.reasoning_content,
+                )
+                final_content = clean
+                # 收集最终思维内容到 thoughts
+                if response.reasoning_content:
+                    thoughts.append({
+                        "step": len(thoughts) + 1,
+                        "action": "reasoning",
+                        "description": "最终思维过程",
+                        "reasoning": response.reasoning_content[:800],
+                    })
+                break
+
+        if final_content is None and iteration >= self.max_iterations:
+            logger.warning("达到最大迭代次数 ({})", self.max_iterations)
+            final_content = (
+                f"我已达到最大工具调用次数 ({self.max_iterations})，"
+                "但尚未完成任务。你可以尝试将任务拆分为更小的步骤。"
+            )
+
+        return final_content, tools_used, messages, thoughts
+
+    async def process_message(
+        self,
+        user_id: str,
+        chat_id: str,
+        message: str,
+        quadrant: str = "tactical",
+        media: list[str] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+    ) -> str:
+        """
+        处理用户消息 — 完整的四阶段循环。
+
+        Args:
+            user_id: 用户 ID
+            chat_id: 会话 ID
+            message: 用户消息
+            quadrant: 四象限身份
+            on_progress: 进度回调（用于 SSE 流式推送）
+
+        Returns:
+            AI 回复文本
+        """
+        session_key = f"{user_id}:{chat_id}"
+        session = self.sessions.get_or_create(session_key)
+
+        logger.info(
+            "event=process_message user_id={user_id} chat_id={chat_id} "
+            "quadrant={quadrant} msg_preview={preview}",
+            user_id=user_id,
+            chat_id=chat_id,
+            quadrant=quadrant,
+            preview=message[:80],
+        )
+
+        # Phase 4 (前置): 异步记忆整合（降低阈値到 CONSOLIDATION_THRESHOLD）
+        unconsolidated = len(session.messages) - session.last_consolidated
+        if unconsolidated >= CONSOLIDATION_THRESHOLD and session_key not in self._consolidating:
+            self._consolidating.add(session_key)
+
+            async def _consolidate() -> None:
+                try:
+                    await MemoryStore(self.workspace).consolidate(
+                        session,
+                        self.provider,
+                        self.model,
+                        memory_window=self.memory_window,
+                    )
+                finally:
+                    self._consolidating.discard(session_key)
+                    task = asyncio.current_task()
+                    if task:
+                        self._consolidation_tasks.discard(task)
+
+            task = asyncio.create_task(_consolidate())
+            self._consolidation_tasks.add(task)
+
+        # Phase 1: 意图检测 + 上下文构建
+        detected = self._intent_detector.detect(message)
+        detected_skill_names = [m.skill_name for m in detected]
+        if detected_skill_names:
+            logger.info(
+                "event=intent_detected skills={} msg_preview={}",
+                detected_skill_names,
+                message[:60],
+            )
+            # 立即通知前端哪些 Skill 被激活（在 LLM 调用之前推送）
+            if on_progress:
+                await on_progress(
+                    "",
+                    event_type="skill_activated",
+                    skill_names=detected_skill_names,
+                )
+
+        history = session.get_history(max_messages=self.memory_window)
+        initial_messages = self.context.build_messages(
+            history=history,
+            current_message=message,
+            quadrant=quadrant,
+            user_id=user_id,
+            chat_id=chat_id,
+            media=media,
+            detected_skills=detected_skill_names or None,
+        )
+
+        # Phase 2-3: Agent Loop
+        final_content, tools_used, all_msgs, thoughts = await self._run_agent_loop(
+            initial_messages,
+            session=session,
+            on_progress=on_progress,
+        )
+
+        if final_content is None:
+            final_content = "处理完成，但没有生成回复。"
+
+        # 通知前端 thoughts（执行步骤详情）
+        if on_progress and thoughts:
+            await on_progress(
+                "",
+                event_type="thoughts",
+                thoughts=thoughts,
+            )
+
+        # 保存本轮会话
+        self._save_turn(session, all_msgs, skip=1 + len(history))
+        self.sessions.save(session)
+
+        logger.info(
+            "event=process_complete user_id={user_id} chat_id={chat_id} "
+            "tools_used={tools} response_len={resp_len}",
+            user_id=user_id,
+            chat_id=chat_id,
+            tools=tools_used,
+            resp_len=len(final_content),
+        )
+
+        # Phase 4 (后置): 异步更新用户画像
+        recent_messages = session.messages[-10:]
+
+        async def _update_profile() -> None:
+            try:
+                await self._user_profiles.update_from_conversation(
+                    user_id,
+                    recent_messages,
+                    self.provider,
+                    self.model,
+                )
+            except Exception:
+                logger.exception("event=profile_update_failed user_id={}", user_id)
+
+        asyncio.create_task(_update_profile())
+
+        return final_content
+
+    def _save_turn(
+        self,
+        session: Session,
+        messages: list[dict[str, Any]],
+        skip: int,
+    ) -> None:
+        """将本轮新消息保存到 Session（截断过长的工具结果）。"""
+        for m in messages[skip:]:
+            entry = dict(m)
+            role = entry.get("role")
+            content = entry.get("content")
+
+            if role == "assistant" and not content and not entry.get("tool_calls"):
+                continue
+
+            if (
+                role == "tool"
+                and isinstance(content, str)
+                and len(content) > self._TOOL_RESULT_MAX_CHARS
+            ):
+                entry["content"] = content[: self._TOOL_RESULT_MAX_CHARS] + "\n... (已截断)"
+
+            if role == "user":
+                if isinstance(content, str):
+                    if content.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+                        parts = content.split("\n\n", 1)
+                        if len(parts) > 1 and parts[1].strip():
+                            entry["content"] = parts[1]
+                        else:
+                            continue
+                elif isinstance(content, list) and len(content) > 0:
+                    first_part = content[0]
+                    if isinstance(first_part, dict) and first_part.get("type") == "text":
+                        text_val = first_part.get("text", "")
+                        if text_val.startswith(ContextBuilder._RUNTIME_CONTEXT_TAG):
+                            parts = text_val.split("\n\n", 1)
+                            if len(parts) > 1 and parts[1].strip():
+                                new_content = list(content)
+                                new_content[0] = {"type": "text", "text": parts[1]}
+                                entry["content"] = new_content
+                            else:
+                                new_content = list(content)[1:]
+                                if not new_content:
+                                    continue
+                                entry["content"] = new_content
+
+            entry.setdefault("timestamp", datetime.now().isoformat())
+            session.messages.append(entry)
+
+        session.updated_at = datetime.now()
+
+    async def clear_session(self, user_id: str, chat_id: str) -> str:
+        """清空会话并归档记忆。"""
+        session_key = f"{user_id}:{chat_id}"
+        session = self.sessions.get_or_create(session_key)
+
+        if session.messages:
+            snapshot_session = Session(key=session.key)
+            snapshot_session.messages = list(session.messages[session.last_consolidated :])
+            await MemoryStore(self.workspace).consolidate(
+                snapshot_session,
+                self.provider,
+                self.model,
+                archive_all=True,
+            )
+
+        session.clear()
+        self.sessions.save(session)
+        self.sessions.invalidate(session_key)
+        return "会话已清空，记忆已归档。"
