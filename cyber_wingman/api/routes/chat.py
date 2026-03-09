@@ -83,7 +83,13 @@ async def chat_stream(req: ChatRequest) -> EventSourceResponse:
         try:
             # 根据 mode 选择执行路径
             is_fast_mode = req.mode == "fast"
-            handler = agent.fast_reply if is_fast_mode else agent.process_message
+            is_crew_mode = req.mode == "crew"
+            if is_fast_mode:
+                handler = agent.fast_reply
+            elif is_crew_mode:
+                handler = agent.crew_reply
+            else:
+                handler = agent.process_message
 
             # 启动 agent 处理
             task = asyncio.create_task(

@@ -168,3 +168,103 @@ class SubagentManager:
     def get_running_count(self) -> int:
         """返回当前运行中的子代理数量。"""
         return len(self._running_tasks)
+
+    async def spawn_and_wait(
+        self,
+        task: str,
+        label: str | None = None,
+        on_progress: Any | None = None,
+    ) -> str:
+        """
+        创建子代理并等待执行完毕，返回结果文本。
+
+        用于 Crew 模式的同步派发阶段。
+        """
+        task_id = str(uuid.uuid4())[:8]
+        display_label = label or (task[:30] + ("..." if len(task) > 30 else ""))
+        logger.info("event=subagent_crew_start id={} label={}", task_id, display_label)
+
+        try:
+            # 通知前端
+            if on_progress:
+                await on_progress(
+                    task,
+                    event_type="subagent_spawned",
+                    task_id=task_id,
+                    task=task,
+                )
+
+            # 构建受限工具集
+            tools = ToolRegistry()
+            tools.register(EmotionAnalysisTool())
+            tools.register(WebSearchTool())
+            tools.register(WebFetchTool())
+
+            system_prompt = self._build_subagent_prompt()
+            messages: list[dict[str, Any]] = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": task},
+            ]
+
+            max_iterations = 15
+            final_result: str | None = None
+
+            for _ in range(max_iterations):
+                response = await self.provider.chat(
+                    messages=messages,
+                    tools=tools.get_definitions(),
+                    model=self.model,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                )
+
+                if response.has_tool_calls:
+                    tool_call_dicts = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                            },
+                        }
+                        for tc in response.tool_calls
+                    ]
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": response.content or "",
+                            "tool_calls": tool_call_dicts,
+                        }
+                    )
+                    for tool_call in response.tool_calls:
+                        result = await tools.execute(tool_call.name, tool_call.arguments)
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.name,
+                                "content": result,
+                            }
+                        )
+                else:
+                    final_result = response.content
+                    break
+
+            result_text = final_result or "子代理执行完毕但未生成回复。"
+
+            # 通知前端子代理完成
+            if on_progress:
+                await on_progress(
+                    result_text[:100],
+                    event_type="subagent_done",
+                    task_id=task_id,
+                    label=display_label,
+                )
+
+            logger.info("event=subagent_crew_done id={} result_len={}", task_id, len(result_text))
+            return result_text
+
+        except Exception as e:
+            logger.error("event=subagent_crew_failed id={} error={}", task_id, str(e))
+            return f"子代理执行失败: {str(e)}"

@@ -555,6 +555,244 @@ class AgentLoop:
 
         return final_content, tools_used, messages, thoughts
 
+    async def crew_reply(
+        self,
+        user_id: str,
+        chat_id: str,
+        message: str,
+        quadrant: str = "tactical",
+        media: list[str] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+        guest: bool = True,
+    ) -> str:
+        """
+        Crew 模式 — 强制执行 Plan→Dispatch→Collect→Synthesize 四阶段流水线。
+
+        不依赖 LLM 自行判断是否需要规划，系统级保证：
+        1. Plan: 限定工具集，强制 LLM 拆解任务
+        2. Dispatch: 为每个子任务并行 spawn subagent
+        3. Collect: 等待所有子代理完成
+        4. Synthesize: 汇总生成最终回答
+        """
+        session_key = f"{user_id}:{chat_id}"
+        session = self.sessions.get_or_create(session_key)
+
+        logger.info(
+            "event=crew_reply user_id={} chat_id={} quadrant={}",
+            user_id, chat_id, quadrant,
+        )
+
+        # ── Step 1: Plan (强制规划) ──────────────────────────────
+        if on_progress:
+            await on_progress("正在制定作战计划...", event_type="crew_phase", phase="plan")
+
+        plan_system = (
+            "你是赛博僚机的规划引擎。你的唯一职责是将用户需求拆解为 2-5 个可并行执行的子任务。\n\n"
+            "## 规则\n"
+            "1. 必须调用 task_create 为每个子任务创建任务节点\n"
+            "2. 如果子任务有依赖关系，用 task_update 的 addBlockedBy 设置\n"
+            "3. 创建完所有任务后，调用 task_list 确认，然后输出一个简短的任务概览\n"
+            "4. 不要直接回答用户问题，只拆解任务\n"
+        )
+
+        plan_messages: list[dict[str, Any]] = [
+            {"role": "system", "content": plan_system},
+            {"role": "user", "content": message},
+        ]
+
+        # 只提供规划工具
+        plan_tools = ToolRegistry()
+        plan_tools.register(TaskCreateTool())
+        plan_tools.register(TaskUpdateTool())
+        plan_tools.register(TaskListTool())
+        plan_tools.register(TaskGetTool())
+
+        plan_result: str | None = None
+        for _ in range(8):  # 允许多轮工具调用来创建任务
+            response = await self.provider.chat(
+                messages=plan_messages,
+                tools=plan_tools.get_definitions(),
+                model=self.model,
+                temperature=0.4,  # 低温确保精准拆解
+                max_tokens=self.max_tokens,
+            )
+
+            if response.has_tool_calls:
+                tool_call_dicts = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                        },
+                    }
+                    for tc in response.tool_calls
+                ]
+                plan_messages.append({
+                    "role": "assistant",
+                    "content": response.content or "",
+                    "tool_calls": tool_call_dicts,
+                })
+
+                for tc in response.tool_calls:
+                    result = await plan_tools.execute(
+                        tc.name, tc.arguments, context={"agent": self}
+                    )
+                    plan_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": tc.name,
+                        "content": result,
+                    })
+
+                    # 通知前端工具调用
+                    if on_progress:
+                        await on_progress(
+                            _make_step_text(tc.name, tc.arguments),
+                            event_type="tool_start",
+                            tool_name=tc.name,
+                            tool_args=tc.arguments,
+                        )
+                        await on_progress(
+                            result[:100],
+                            event_type="tool_done",
+                            tool_name=tc.name,
+                            success=True,
+                        )
+            else:
+                plan_result = response.content
+                break
+
+        # 读取规划阶段创建的任务
+        from cyber_wingman.agent.tools.task_manager import TaskManager
+        task_mgr = TaskManager(self.workspace)
+        tasks_overview = task_mgr.list_all()
+
+        # 解析出所有 pending 任务
+        pending_tasks: list[dict[str, Any]] = []
+        for f in sorted(task_mgr.dir.glob("task_*.json")):
+            try:
+                with open(f, "r", encoding="utf-8") as fd:
+                    t = json.load(fd)
+                if t.get("status") == "pending":
+                    pending_tasks.append(t)
+            except Exception:
+                pass
+
+        # 发送 crew_plan 事件
+        if on_progress:
+            await on_progress(
+                tasks_overview,
+                event_type="crew_plan",
+                tasks=[{"id": t["id"], "subject": t["subject"], "status": t["status"]} for t in pending_tasks],
+                plan_summary=plan_result or "",
+            )
+
+        if not pending_tasks:
+            # 没有创建任何任务，直接返回规划结果
+            final = plan_result or "规划阶段未生成任何子任务。"
+            if on_progress:
+                await on_progress(final, event_type="progress")
+            return final
+
+        # ── Step 2-3: Dispatch & Collect (并行派发 + 收集) ────────
+        if on_progress:
+            await on_progress(
+                f"正在并行执行 {len(pending_tasks)} 个子任务...",
+                event_type="crew_phase",
+                phase="dispatch",
+            )
+
+        from cyber_wingman.agent.subagent import SubagentManager
+        sub_mgr = SubagentManager(
+            provider=self.provider,
+            workspace=self.workspace,
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+
+        # 并行 spawn 所有子代理
+        coros = [
+            sub_mgr.spawn_and_wait(
+                task=f"任务 #{t['id']}: {t['subject']}\n{t.get('description', '')}",
+                label=t["subject"],
+                on_progress=on_progress,
+            )
+            for t in pending_tasks
+        ]
+        results = await asyncio.gather(*coros, return_exceptions=True)
+
+        # 收集结果
+        collected: list[str] = []
+        for t, result in zip(pending_tasks, results):
+            if isinstance(result, Exception):
+                collected.append(f"## 任务 #{t['id']}: {t['subject']}\n❌ 执行失败: {result}")
+            else:
+                collected.append(f"## 任务 #{t['id']}: {t['subject']}\n{result}")
+
+            # 标记任务完成
+            try:
+                task_mgr.update(t["id"], status="completed")
+            except Exception:
+                pass
+
+        # ── Step 4: Synthesize (汇总) ────────────────────────────
+        if on_progress:
+            await on_progress("正在汇总所有结果...", event_type="crew_phase", phase="synthesize")
+
+        synth_prompt = (
+            "你是赛博僚机。以下是你的子代理团队针对用户需求并行执行后的各项结果。\n"
+            "请将这些结果综合整理成一份结构清晰、可直接阅读的完整回复。\n"
+            "不要简单罗列，要有逻辑地融合。\n\n"
+            f"## 用户原始需求\n{message}\n\n"
+            f"## 子代理执行结果\n" + "\n\n".join(collected)
+        )
+
+        try:
+            synth_response = await self.provider.chat(
+                messages=[
+                    {"role": "system", "content": "你是赛博僚机，正在 Crew 模式下汇总子代理的执行结果。"},
+                    {"role": "user", "content": synth_prompt},
+                ],
+                tools=None,
+                model=self.model,
+                temperature=0.6,
+                max_tokens=self.max_tokens,
+            )
+            final_content = self._strip_think(synth_response.content or "") or "汇总完成但未生成内容。"
+        except Exception as exc:
+            logger.error("event=crew_synthesize_error error={}", str(exc))
+            final_content = "子代理结果汇总失败。以下是原始结果:\n\n" + "\n\n".join(collected)
+
+        # 推送最终结果
+        if on_progress:
+            await on_progress(final_content, event_type="progress")
+
+        # 保存本轮会话
+        history = session.get_history(max_messages=10)
+        all_msgs = self.context.build_messages(
+            history=history,
+            current_message=message,
+            quadrant=quadrant,
+            user_id=user_id,
+            chat_id=chat_id,
+            media=media,
+            detected_skills=None,
+        )
+        all_msgs.append({"role": "assistant", "content": final_content})
+        self._save_turn(session, all_msgs, skip=1 + len(history))
+        if not guest:
+            self.sessions.save(session)
+
+        logger.info(
+            "event=crew_reply_done user_id={} tasks={} result_len={}",
+            user_id, len(pending_tasks), len(final_content),
+        )
+
+        return final_content
+
     async def fast_reply(
         self,
         user_id: str,
@@ -594,18 +832,35 @@ class AgentLoop:
         )
 
         try:
+            # 诊断日志：打印发送给 LLM 的消息数量和角色
+            msg_roles = [m.get("role") for m in messages]
+            logger.info(
+                "event=fast_reply_sending msg_count={} roles={}",
+                len(messages), msg_roles,
+            )
+
             response = await self.provider.chat(
                 messages=messages,
-                tools=[],  # 不提供任何工具
+                tools=None,  # Fast 模式不传工具（None 而非空列表）
                 model=self.model,
-                temperature=max(0.5, self.temperature - 0.1),  # 稍微降低 temperature 确保稳定
+                temperature=max(0.5, self.temperature - 0.1),
                 max_tokens=self.max_tokens,
+            )
+
+            # 诊断日志：打印 LLM 返回的内容概况
+            logger.info(
+                "event=fast_reply_received content_len={} finish_reason={} has_tool_calls={}",
+                len(response.content) if response.content else 0,
+                response.finish_reason,
+                response.has_tool_calls,
             )
         except Exception as exc:
             logger.error("event=fast_reply_error error={}", str(exc))
             return "抱歉，AI 服务暂时无法响应，请稍候重试。"
 
-        final_content = self._strip_think(response.content) or "（AI 没有生成回复）"
+        # 处理 content=None 的情况（部分模型可能发生）
+        raw_content = response.content or ""
+        final_content = self._strip_think(raw_content) or raw_content or "（AI 没有生成回复）"
 
         # 推送流式事件（Fast 模式只发 progress + done，不发工具事件）
         if on_progress:
