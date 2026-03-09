@@ -1,0 +1,14 @@
+F841 Local variable `final_result` is assigned to but never used
+   --> cyber_wingman\agent\subagent.py:105:13
+    |
+103 |             )
+104 |
+105 |             final_result = final_content or "瀛愪唬鐞嗕换鍔″畬鎴愶紝浣嗘湭鐢熸垚鏈€缁堝洖澶嶃€?
+    |             ^^^^^^^^^^^^
+106 |
+107 |             logger.info("event=subagent_complete id={} label={}", task_id, label)
+    |
+help: Remove assignment to unused variable `final_result`
+
+Found 1 error.
+No fixes available (1 hidden fix can be enabled with the `--unsafe-fixes` option).
