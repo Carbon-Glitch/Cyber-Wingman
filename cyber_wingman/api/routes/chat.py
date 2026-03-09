@@ -35,6 +35,10 @@ class ChatRequest(BaseModel):
         default="wingman",
         description="运行模式: fast (直接 LLM 单次输出) / wingman (完整 Agent 模式)",
     )
+    guest: bool = Field(
+        default=True,
+        description="是否为游客模式（不持久化到磁盘）",
+    )
     quadrant: str = Field(
         default="tactical", description="四象限身份: tactical/strategist/bestie/advisor"
     )
@@ -90,6 +94,7 @@ async def chat_stream(req: ChatRequest) -> EventSourceResponse:
                     quadrant=req.quadrant,
                     media=req.media,
                     on_progress=on_progress,
+                    guest=req.guest,
                 )
             )
 

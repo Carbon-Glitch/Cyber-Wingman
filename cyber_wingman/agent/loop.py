@@ -563,6 +563,7 @@ class AgentLoop:
         quadrant: str = "tactical",
         media: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        guest: bool = True,
     ) -> str:
         """
         Fast 模式 — 单次 LLM 调用，不使用任何 Tools 或 Skills。
@@ -610,9 +611,13 @@ class AgentLoop:
         if on_progress:
             await on_progress(final_content, event_type="progress")
 
-        # 轻量保存：只追加本轮 user + assistant
-        self._save_turn(session, messages + [{"role": "assistant", "content": final_content}], skip=len(messages))
-        self.sessions.save(session)
+        # 轻量保存：保存当前 user 消息 + assistant 回复
+        # skip = 1 (system prompt) + len(history) → 留下当前 user 消息 + 新 assistant 回复
+        all_msgs = messages + [{"role": "assistant", "content": final_content}]
+        self._save_turn(session, all_msgs, skip=1 + len(history))
+        # 游客模式不写磁盘
+        if not guest:
+            self.sessions.save(session)
 
         logger.info(
             "event=fast_reply_done user_id={user_id} resp_len={resp_len}",
@@ -630,6 +635,7 @@ class AgentLoop:
         quadrant: str = "tactical",
         media: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        guest: bool = True,
     ) -> str:
         """
         处理用户消息 — 完整的四阶段循环。
@@ -656,9 +662,11 @@ class AgentLoop:
             preview=message[:80],
         )
 
-        # Phase 4 (前置): 异步记忆整合（降低阈値到 CONSOLIDATION_THRESHOLD）
+        # Phase 4 (前置): 异步记忆整合（游客模式跳过）
         unconsolidated = len(session.messages) - session.last_consolidated
-        if unconsolidated >= CONSOLIDATION_THRESHOLD and session_key not in self._consolidating:
+        if (not guest
+                and unconsolidated >= CONSOLIDATION_THRESHOLD
+                and session_key not in self._consolidating):
             self._consolidating.add(session_key)
 
             async def _consolidate() -> None:
@@ -744,9 +752,10 @@ class AgentLoop:
                 thoughts=thoughts,
             )
 
-        # 保存本轮会话
+        # 保存本轮会话（游客模式不写磁盘）
         self._save_turn(session, all_msgs, skip=1 + len(history))
-        self.sessions.save(session)
+        if not guest:
+            self.sessions.save(session)
 
         logger.info(
             "event=process_complete user_id={user_id} chat_id={chat_id} "
@@ -757,21 +766,22 @@ class AgentLoop:
             resp_len=len(final_content),
         )
 
-        # Phase 4 (后置): 异步更新用户画像
-        recent_messages = session.messages[-10:]
+        # Phase 4 (后置): 异步更新用户画像（游客模式跳过）
+        if not guest:
+            recent_messages = session.messages[-10:]
 
-        async def _update_profile() -> None:
-            try:
-                await self._user_profiles.update_from_conversation(
-                    user_id,
-                    recent_messages,
-                    self.provider,
-                    self.model,
-                )
-            except Exception:
-                logger.exception("event=profile_update_failed user_id={}", user_id)
+            async def _update_profile() -> None:
+                try:
+                    await self._user_profiles.update_from_conversation(
+                        user_id,
+                        recent_messages,
+                        self.provider,
+                        self.model,
+                    )
+                except Exception:
+                    logger.exception("event=profile_update_failed user_id={}", user_id)
 
-        asyncio.create_task(_update_profile())
+            asyncio.create_task(_update_profile())
 
         return final_content
 
