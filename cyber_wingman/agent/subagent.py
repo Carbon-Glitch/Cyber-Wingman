@@ -11,16 +11,12 @@ SubAgent 管理器 — 后台子代理执行。
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
-from cyber_wingman.agent.tools.emotion import EmotionAnalysisTool
-from cyber_wingman.agent.tools.registry import ToolRegistry
-from cyber_wingman.agent.tools.web import WebFetchTool, WebSearchTool
 from cyber_wingman.providers.base import LLMProvider
 
 
@@ -81,72 +77,32 @@ class SubagentManager:
         logger.info("event=subagent_start id={} label={}", task_id, label)
 
         try:
-            # 构建受限工具集（无 spawn，防递归）
-            tools = ToolRegistry()
-            tools.register(EmotionAnalysisTool())
-            tools.register(WebSearchTool())
-            tools.register(WebFetchTool())
+            from cyber_wingman.agent.loop import AgentLoop
+            from cyber_wingman.session.manager import Session
 
-            system_prompt = self._build_subagent_prompt()
-            messages: list[dict[str, Any]] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": task},
-            ]
+            sub_agent = AgentLoop(
+                provider=self.provider,
+                workspace=self.workspace,
+                model=self.model,
+                temperature=self.temperature,
+                max_iterations=15,
+            )
 
-            # 独立的 agent loop（最多 15 次迭代）
-            max_iterations = 15
-            final_result: str | None = None
+            # 屏蔽 spawn_subagent 以防止无限递归
+            sub_agent.tools.unregister("spawn_subagent")
 
-            for _ in range(max_iterations):
-                response = await self.provider.chat(
-                    messages=messages,
-                    tools=tools.get_definitions(),
-                    model=self.model,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                )
+            # 修改子代理的 system_prompt
+            sub_agent.context._core_identity = sub_agent.context._core_identity + "\n\n[System Note: 你是主 Agent 派生出的子代理 (Subagent)。你应该专注于完成派发给你的任务，不要与用户闲聊，完成后给出详尽的结论或总结。]"
 
-                if response.has_tool_calls:
-                    tool_call_dicts = [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                            },
-                        }
-                        for tc in response.tool_calls
-                    ]
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": response.content or "",
-                            "tool_calls": tool_call_dicts,
-                        }
-                    )
+            sub_session = Session.create(f"subagent_temp_{task_id}")
 
-                    for tool_call in response.tool_calls:
-                        logger.debug(
-                            "Subagent [{}] executing: {}",
-                            task_id,
-                            tool_call.name,
-                        )
-                        result = await tools.execute(tool_call.name, tool_call.arguments)
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "name": tool_call.name,
-                                "content": result,
-                            }
-                        )
-                else:
-                    final_result = response.content
-                    break
+            final_content, _, _, _ = await sub_agent._run_agent_loop(
+                [{"role": "user", "content": task}],
+                session=sub_session,
+                on_progress=None,
+            )
 
-            if final_result is None:
-                final_result = "子代理任务完成，但未生成最终回复。"
+            # 仅记录执行完成
 
             logger.info("event=subagent_complete id={} label={}", task_id, label)
 
@@ -194,64 +150,32 @@ class SubagentManager:
                     task=task,
                 )
 
-            # 构建受限工具集
-            tools = ToolRegistry()
-            tools.register(EmotionAnalysisTool())
-            tools.register(WebSearchTool())
-            tools.register(WebFetchTool())
+            from cyber_wingman.agent.loop import AgentLoop
+            from cyber_wingman.session.manager import Session
 
-            system_prompt = self._build_subagent_prompt()
-            messages: list[dict[str, Any]] = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": task},
-            ]
+            sub_agent = AgentLoop(
+                provider=self.provider,
+                workspace=self.workspace,
+                model=self.model,
+                temperature=self.temperature,
+                max_iterations=15,
+            )
 
-            max_iterations = 15
-            final_result: str | None = None
+            # 屏蔽 spawn_subagent 以防止无限递归
+            sub_agent.tools.unregister("spawn_subagent")
 
-            for _ in range(max_iterations):
-                response = await self.provider.chat(
-                    messages=messages,
-                    tools=tools.get_definitions(),
-                    model=self.model,
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                )
+            # 修改子代理的 system_prompt
+            sub_agent.context._core_identity = sub_agent.context._core_identity + "\n\n[System Note: 你是主 Agent 派生出的子代理 (Subagent)。你应该专注于完成派发给你的任务，不要与用户闲聊，完成后给出详尽的结论或总结。]"
 
-                if response.has_tool_calls:
-                    tool_call_dicts = [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                            },
-                        }
-                        for tc in response.tool_calls
-                    ]
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": response.content or "",
-                            "tool_calls": tool_call_dicts,
-                        }
-                    )
-                    for tool_call in response.tool_calls:
-                        result = await tools.execute(tool_call.name, tool_call.arguments)
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "name": tool_call.name,
-                                "content": result,
-                            }
-                        )
-                else:
-                    final_result = response.content
-                    break
+            sub_session = Session.create(f"subagent_temp_{task_id}")
 
-            result_text = final_result or "子代理执行完毕但未生成回复。"
+            final_content, _, _, _ = await sub_agent._run_agent_loop(
+                [{"role": "user", "content": task}],
+                session=sub_session,
+                on_progress=None,
+            )
+
+            result_text = final_content or "子代理执行完毕但未生成回复。"
 
             # 通知前端子代理完成
             if on_progress:
