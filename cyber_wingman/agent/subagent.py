@@ -91,13 +91,22 @@ class SubagentManager:
             # 屏蔽 spawn_subagent 以防止无限递归
             sub_agent.tools.unregister("spawn_subagent")
 
-            # 修改子代理的 system_prompt
-            sub_agent.context._core_identity = sub_agent.context._core_identity + "\n\n[System Note: 你是主 Agent 派生出的子代理 (Subagent)。你应该专注于完成派发给你的任务，不要与用户闲聊，完成后给出详尽的结论或总结。]"
-
             sub_session = Session.create(f"subagent_temp_{task_id}")
 
+            # 动态生成包含基本设定的 System Prompt，并在此之上追加 Subagent 强制指令
+            base_prompt = sub_agent.context.build_system_prompt(quadrant="tactical")
+            subagent_instruction = (
+                "\n\n[System Note: 你是主 Agent 派生出的子代理 (Subagent)。你应该专注于完成派发给你的任务，"
+                "不要与用户闲聊，完成后给出详尽的结论或总结。]"
+            )
+            
+            messages = [
+                {"role": "system", "content": base_prompt + subagent_instruction},
+                {"role": "user", "content": task}
+            ]
+
             final_content, _, _, _ = await sub_agent._run_agent_loop(
-                [{"role": "user", "content": task}],
+                messages,
                 session=sub_session,
                 on_progress=None,
             )
@@ -164,13 +173,22 @@ class SubagentManager:
             # 屏蔽 spawn_subagent 以防止无限递归
             sub_agent.tools.unregister("spawn_subagent")
 
-            # 修改子代理的 system_prompt
-            sub_agent.context._core_identity = sub_agent.context._core_identity + "\n\n[System Note: 你是主 Agent 派生出的子代理 (Subagent)。你应该专注于完成派发给你的任务，不要与用户闲聊，完成后给出详尽的结论或总结。]"
-
             sub_session = Session.create(f"subagent_temp_{task_id}")
 
+            # 动态生成包含基本设定的 System Prompt，并在此之上追加 Subagent 强制指令
+            base_prompt = sub_agent.context.build_system_prompt(quadrant="tactical")
+            subagent_instruction = (
+                "\n\n[System Note: 你是主 Agent 派生出的子代理 (Subagent)。你应该专注于完成派发给你的任务，"
+                "不要与用户闲聊，完成后给出详尽的结论或总结。]"
+            )
+
+            messages = [
+                {"role": "system", "content": base_prompt + subagent_instruction},
+                {"role": "user", "content": task}
+            ]
+
             final_content, _, _, _ = await sub_agent._run_agent_loop(
-                [{"role": "user", "content": task}],
+                messages,
                 session=sub_session,
                 on_progress=None,
             )
