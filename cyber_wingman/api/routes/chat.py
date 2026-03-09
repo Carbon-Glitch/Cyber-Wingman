@@ -31,6 +31,10 @@ class ChatRequest(BaseModel):
     user_id: str = Field(description="用户 ID")
     chat_id: str = Field(description="会话 ID")
     message: str = Field(description="用户消息内容")
+    mode: str = Field(
+        default="wingman",
+        description="运行模式: fast (直接 LLM 单次输出) / wingman (完整 Agent 模式)",
+    )
     quadrant: str = Field(
         default="tactical", description="四象限身份: tactical/strategist/bestie/advisor"
     )
@@ -73,9 +77,13 @@ async def chat_stream(req: ChatRequest) -> EventSourceResponse:
 
     async def generate():
         try:
+            # 根据 mode 选择执行路径
+            is_fast_mode = req.mode == "fast"
+            handler = agent.fast_reply if is_fast_mode else agent.process_message
+
             # 启动 agent 处理
             task = asyncio.create_task(
-                agent.process_message(
+                handler(
                     user_id=req.user_id,
                     chat_id=req.chat_id,
                     message=req.message,

@@ -313,6 +313,21 @@ class AgentLoop:
                     self.model,
                     transcript_dir=self.workspace / ".transcripts",
                 )
+                # Identity Re-injection: 压缩后重新向模型注入角色身份，防止人格漂移
+                messages = [
+                    {
+                        "role": "user",
+                        "content": (
+                            "<identity>你是「赛博僚机」，一位专业的两性情感 AI 助手。"
+                            "上下文已被压缩以节省空间，请基于历史摘要继续与用户沟通。</identity>"
+                        ),
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "明白，我是赛博僚机。继续帮助您。",
+                    },
+                ] + messages
+                logger.info("event=identity_reinjected after_auto_compact")
 
             # Phase 2: LLM 推理（指数退避重试）
             response = None
@@ -352,14 +367,44 @@ class AgentLoop:
                     len(recent_tool_sequences) == 3
                     and len(set(recent_tool_sequences)) == 1
                 ):
-                    logger.warning(
-                        "event=tool_loop_detected sequence={}", current_sequence
+                    # Three-stage progressive response to tool loop
+                    loop_count = sum(
+                        1 for seq in recent_tool_sequences if seq == current_sequence
                     )
-                    final_content = (
-                        "检测到工具调用循环（相同工具序列重复 3 次），已主动中断。"
-                        "请尝试换一种方式提问，或拆分任务为更小的步骤。"
-                    )
-                    break
+                    if loop_count == 1:
+                        # Stage 1: Inject a skip hint into the next tool result
+                        logger.warning(
+                            "event=tool_loop_stage1 sequence={}", current_sequence
+                        )
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[系统提醒] 你正在重复相同的搜索操作。"
+                                "请尽快根据已收集的情报综合输出，不要再发起重复查询。"
+                            )
+                        })
+                    elif loop_count == 2:
+                        # Stage 2: Force model to synthesize from existing context
+                        logger.warning(
+                            "event=tool_loop_stage2 sequence={}", current_sequence
+                        )
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[系统强制中断] 你连续 2 次重复了相同操作。"
+                                "现在必须基于已收集的所有信息立刻统合输出最终答案，严禁再调用任何工具。"
+                            )
+                        })
+                    else:
+                        # Stage 3: Hard abort
+                        logger.warning(
+                            "event=tool_loop_aborted sequence={}", current_sequence
+                        )
+                        final_content = (
+                            "检测到重复工具调用循环，已中断执行。"
+                            "请尝试换一种方式提问，或拆分任务为更小的步骤。"
+                        )
+                        break
                 # 发送 thinking 事件（如果有推理内容）
                 if on_progress and response.reasoning_content:
                     await on_progress(
@@ -463,6 +508,19 @@ class AgentLoop:
                         self.model,
                         transcript_dir=self.workspace / ".transcripts",
                     )
+                    # Identity re-injection after manual compact too
+                    identity_block = {
+                        "role": "user",
+                        "content": (
+                            "<identity>你是「赛博僚机」，一位专业的两性情感 AI 助手。"
+                            "上下文已压缩，请基于历史摘要继续工作。</identity>"
+                        ),
+                    }
+                    ack_block = {
+                        "role": "assistant",
+                        "content": "明白，我是赛博僚机。继续。",
+                    }
+                    messages = [identity_block, ack_block] + messages
                     manual_compact_requested = False
 
             else:
@@ -496,6 +554,73 @@ class AgentLoop:
             )
 
         return final_content, tools_used, messages, thoughts
+
+    async def fast_reply(
+        self,
+        user_id: str,
+        chat_id: str,
+        message: str,
+        quadrant: str = "tactical",
+        media: list[str] | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+    ) -> str:
+        """
+        Fast 模式 — 单次 LLM 调用，不使用任何 Tools 或 Skills。
+
+        只拼接：系统人格 Prompt + 最近 10 条历史 + 当前消息，直接返回 LLM 输出。
+        特点：TTFT < 1s，Token 消耗最低，适合快问快答。
+        """
+        session_key = f"{user_id}:{chat_id}"
+        session = self.sessions.get_or_create(session_key)
+
+        logger.info(
+            "event=fast_reply user_id={user_id} chat_id={chat_id} quadrant={quadrant}",
+            user_id=user_id,
+            chat_id=chat_id,
+            quadrant=quadrant,
+        )
+
+        # 构建精简 messages：系统 Prompt + 最近10条 + 当前消息
+        history = session.get_history(max_messages=10)
+        messages = self.context.build_messages(
+            history=history,
+            current_message=message,
+            quadrant=quadrant,
+            user_id=user_id,
+            chat_id=chat_id,
+            media=media,
+            detected_skills=None,  # Fast 模式不注入 Skills
+        )
+
+        try:
+            response = await self.provider.chat(
+                messages=messages,
+                tools=[],  # 不提供任何工具
+                model=self.model,
+                temperature=max(0.5, self.temperature - 0.1),  # 稍微降低 temperature 确保稳定
+                max_tokens=self.max_tokens,
+            )
+        except Exception as exc:
+            logger.error("event=fast_reply_error error={}", str(exc))
+            return "抱歉，AI 服务暂时无法响应，请稍候重试。"
+
+        final_content = self._strip_think(response.content) or "（AI 没有生成回复）"
+
+        # 推送流式事件（Fast 模式只发 progress + done，不发工具事件）
+        if on_progress:
+            await on_progress(final_content, event_type="progress")
+
+        # 轻量保存：只追加本轮 user + assistant
+        self._save_turn(session, messages + [{"role": "assistant", "content": final_content}], skip=len(messages))
+        self.sessions.save(session)
+
+        logger.info(
+            "event=fast_reply_done user_id={user_id} resp_len={resp_len}",
+            user_id=user_id,
+            resp_len=len(final_content),
+        )
+
+        return final_content
 
     async def process_message(
         self,
@@ -580,6 +705,26 @@ class AgentLoop:
             media=media,
             detected_skills=detected_skill_names or None,
         )
+
+        # 待领任务提醒：如果有 pending 任务，动态注入提醒段落
+        try:
+            from cyber_wingman.agent.tools.task_manager import TaskManager
+            task_mgr_str = TaskManager(self.workspace).list_all()
+            if task_mgr_str and task_mgr_str != "No tasks active." and "[\u003e]" not in task_mgr_str and "[ ]" in task_mgr_str:
+                pending_reminder = (
+                    f"\n[\u540e\u53f0\u4efb\u52a1\u63d0\u9192] 你有以下待处理任务\uff0c"
+                    f"请视当前对话内容决定是否处理\uff1a\n"
+                    f"{task_mgr_str}"
+                )
+                # 注入到 initial_messages 中第一条 user 消息的前遭
+                for i, msg in enumerate(initial_messages):
+                    if msg.get("role") == "user":
+                        content = msg.get("content", "")
+                        if isinstance(content, str):
+                            initial_messages[i]["content"] = content + pending_reminder
+                        break
+        except Exception:
+            pass  # 任务提醒不影响主流程
 
         # Phase 2-3: Agent Loop
         final_content, tools_used, all_msgs, thoughts = await self._run_agent_loop(
