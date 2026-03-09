@@ -595,6 +595,16 @@ class AgentLoop:
             "4. 不要直接回答用户问题，只拆解任务\n"
         )
 
+        # 【Fix 1】每次 Crew 请求前清空上一次残留的任务文件，防止 ID 冲突
+        from cyber_wingman.agent.tools.task_manager import TaskManager
+        task_mgr = TaskManager(self.workspace)
+        for stale in list(task_mgr.dir.glob("task_*.json")):
+            try:
+                stale.unlink()
+            except Exception:
+                pass
+        task_mgr._next_id = 1  # 重置 ID 计数器
+
         plan_messages: list[dict[str, Any]] = [
             {"role": "system", "content": plan_system},
             {"role": "user", "content": message},
@@ -664,9 +674,7 @@ class AgentLoop:
                 plan_result = response.content
                 break
 
-        # 读取规划阶段创建的任务
-        from cyber_wingman.agent.tools.task_manager import TaskManager
-        task_mgr = TaskManager(self.workspace)
+        # 读取规划阶段创建的任务（task_mgr 已在上方初始化）
         tasks_overview = task_mgr.list_all()
 
         # 解析出所有 pending 任务
@@ -713,10 +721,16 @@ class AgentLoop:
             max_tokens=self.max_tokens,
         )
 
-        # 并行 spawn 所有子代理
+        # 并行 spawn 所有子代理：注入当前日期上下文，让子代理自行判断是否搜索
+        now_str = datetime.now().strftime("%Y-%m-%d")
         coros = [
             sub_mgr.spawn_and_wait(
-                task=f"任务 #{t['id']}: {t['subject']}\n{t.get('description', '')}",
+                task=(
+                    f"任务 #{t['id']}: {t['subject']}\n"
+                    f"{t.get('description', '')}\n\n"
+                    f"**当前日期**: {now_str}\n"
+                    "**工作指令**: 完成后给出结构化的详细结论。"
+                ),
                 label=t["subject"],
                 on_progress=on_progress,
             )
@@ -742,12 +756,20 @@ class AgentLoop:
         if on_progress:
             await on_progress("正在汇总所有结果...", event_type="crew_phase", phase="synthesize")
 
+        # 【Fix 3】强化综合提示词，要求主 Agent 真正整合信息而非简单罗列
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         synth_prompt = (
-            "你是赛博僚机。以下是你的子代理团队针对用户需求并行执行后的各项结果。\n"
-            "请将这些结果综合整理成一份结构清晰、可直接阅读的完整回复。\n"
-            "不要简单罗列，要有逻辑地融合。\n\n"
+            f"当前时间：{now_str}\n\n"
+            "你是赛博僚机。你的子代理团队刚刚并行完成了多个研究任务并汇报了结果。\n"
+            "你需要像一个真正的战略参谋一样，将这些碎片化的情报整合成一份完整、可执行的作战方案。\n\n"
+            "## 输出要求\n"
+            "1. **不要直接粘贴子代理的原始回复**，要提炼、融合、去除重复\n"
+            "2. 用清晰的标题结构组织内容（二级标题 ##）\n"
+            "3. 关键建议要具体可执行，不要泛泛而谈\n"
+            "4. 如果子代理搜索到了实时信息（餐厅/活动/价格），要在回复中加以引用\n"
+            "5. 结尾给出一个简短的「行动摘要」（3-5 条 bullet）\n\n"
             f"## 用户原始需求\n{message}\n\n"
-            f"## 子代理执行结果\n" + "\n\n".join(collected)
+            "## 子代理调研结果\n" + "\n\n".join(collected)
         )
 
         try:
