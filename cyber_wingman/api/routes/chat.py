@@ -77,7 +77,7 @@ async def chat_stream(
         event_type = kwargs.get("event_type", "progress")
         payload: dict[str, Any] = {"content": content}
         # 附加结构化字段
-        for key in ("tool_name", "tool_args", "success", "skill_names", "thoughts"):
+        for key in ("tool_name", "tool_args", "success", "skill_names", "thoughts", "options", "analysis"):
             if key in kwargs:
                 payload[key] = kwargs[key]
         await progress_queue.put({"event": event_type, "data": payload})

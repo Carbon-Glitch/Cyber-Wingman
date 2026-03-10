@@ -45,6 +45,7 @@ from cyber_wingman.agent.tools.ideal_type_test import IdealTypeTestTool
 from cyber_wingman.agent.tools.knowledge_search import KnowledgeSearchTool
 from cyber_wingman.agent.tools.registry import ToolRegistry
 from cyber_wingman.agent.tools.reply_generator import ReplyGeneratorTool
+from cyber_wingman.agent.tools.suggest_replies import SuggestRepliesTool
 from cyber_wingman.agent.tools.subagent import SpawnSubagentTool
 from cyber_wingman.agent.tools.task_manager import (
     TaskCreateTool,
@@ -84,6 +85,7 @@ _TOOL_ACTION_TEMPLATES: dict[str, str] = {
     "task_update": "更新任务节点状态: {task_id}",
     "task_list": "检视所有任务线状图",
     "task_get": "获取具体子任务内容: {task_id}",
+    "suggest_replies": "生成 3 条一键复制的网聊回复建议",
 }
 
 
@@ -243,6 +245,7 @@ class AgentLoop:
         self.tools.register(EmotionAnalysisTool())
         self.tools.register(IdealTypeTestTool())
         self.tools.register(ReplyGeneratorTool())
+        self.tools.register(SuggestRepliesTool())
         self.tools.register(KnowledgeSearchTool())
 
         # 通用工具
