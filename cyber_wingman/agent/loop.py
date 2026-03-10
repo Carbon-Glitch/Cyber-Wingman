@@ -575,7 +575,7 @@ class AgentLoop:
         4. Synthesize: 汇总生成最终回答
         """
         session_key = f"{user_id}:{chat_id}"
-        session = self.sessions.get_or_create(session_key)
+        session = await self.sessions.get_or_create(session_key)
 
         logger.info(
             "event=crew_reply user_id={} chat_id={} quadrant={}",
@@ -832,7 +832,7 @@ class AgentLoop:
         特点：TTFT < 1s，Token 消耗最低，适合快问快答。
         """
         session_key = f"{user_id}:{chat_id}"
-        session = self.sessions.get_or_create(session_key)
+        session = await self.sessions.get_or_create(session_key)
 
         logger.info(
             "event=fast_reply user_id={user_id} chat_id={chat_id} quadrant={quadrant}",
@@ -894,7 +894,7 @@ class AgentLoop:
         self._save_turn(session, all_msgs, skip=1 + len(history))
         # 游客模式不写磁盘
         if not guest:
-            self.sessions.save(session)
+            await self.sessions.save(session)
 
         logger.info(
             "event=fast_reply_done user_id={user_id} resp_len={resp_len}",
@@ -928,7 +928,7 @@ class AgentLoop:
             AI 回复文本
         """
         session_key = f"{user_id}:{chat_id}"
-        session = self.sessions.get_or_create(session_key)
+        session = await self.sessions.get_or_create(session_key)
 
         logger.info(
             "event=process_message user_id={user_id} chat_id={chat_id} "
@@ -1032,7 +1032,7 @@ class AgentLoop:
         # 保存本轮会话（游客模式不写磁盘）
         self._save_turn(session, all_msgs, skip=1 + len(history))
         if not guest:
-            self.sessions.save(session)
+            await self.sessions.save(session)
 
         logger.info(
             "event=process_complete user_id={user_id} chat_id={chat_id} "
@@ -1116,7 +1116,7 @@ class AgentLoop:
     async def clear_session(self, user_id: str, chat_id: str) -> str:
         """清空会话并归档记忆。"""
         session_key = f"{user_id}:{chat_id}"
-        session = self.sessions.get_or_create(session_key)
+        session = await self.sessions.get_or_create(session_key)
 
         if session.messages:
             snapshot_session = Session(key=session.key)
@@ -1129,6 +1129,6 @@ class AgentLoop:
             )
 
         session.clear()
-        self.sessions.save(session)
+        await self.sessions.save(session)
         self.sessions.invalidate(session_key)
         return "会话已清空，记忆已归档。"

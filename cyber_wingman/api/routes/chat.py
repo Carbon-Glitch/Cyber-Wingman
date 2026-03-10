@@ -156,17 +156,44 @@ async def chat_stream(
     return EventSourceResponse(generate())
 
 
+# ── 获取会话列表 ──────────────────────────────────────────────
+
+@router.get("/chat/sessions")
+async def list_user_sessions(user_id: str = Depends(get_current_user_id)) -> dict[str, Any]:
+    """获取当前用户的会话列表。"""
+    agent = get_agent_loop()
+    sessions = await agent.sessions.list_sessions(user_id)
+    return {"sessions": sessions}
+
+@router.get("/chat/sessions/{chat_id}")
+async def get_session_history(
+    chat_id: str,
+    user_id: str = Depends(get_current_user_id)
+) -> dict[str, Any]:
+    """ lazy-load 获取某个会话的所有消息历史。"""
+    agent = get_agent_loop()
+    session_key = f"{user_id}:{chat_id}"
+    session = await agent.sessions.get_or_create(session_key)
+    return {
+        "id": chat_id,
+        "title": getattr(session, "title", "Chat"),
+        "messages": session.messages
+    }
+
+
 # ── 同步聊天 ──────────────────────────────────────────────────
 
-
 @router.post("/chat/sync", response_model=ChatResponse)
-async def chat_sync(req: ChatRequest) -> ChatResponse:
+async def chat_sync(
+    req: ChatRequest,
+    user_id: str = Depends(get_current_user_id)
+) -> ChatResponse:
     """同步聊天 — 返回完整响应。"""
     agent = get_agent_loop()
 
     try:
         reply = await agent.process_message(
-            user_id=req.user_id,
+            user_id=user_id,
             chat_id=req.chat_id,
             message=req.message,
             quadrant=req.quadrant,
@@ -174,7 +201,7 @@ async def chat_sync(req: ChatRequest) -> ChatResponse:
         )
         return ChatResponse(
             reply=reply,
-            user_id=req.user_id,
+            user_id=user_id,
             chat_id=req.chat_id,
         )
     except Exception as e:
