@@ -12,12 +12,13 @@ import asyncio
 import json
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from cyber_wingman.api.app import get_agent_loop
+from cyber_wingman.api.middleware.auth import get_current_user_id
 
 router = APIRouter()
 
@@ -26,9 +27,8 @@ router = APIRouter()
 
 
 class ChatRequest(BaseModel):
-    """聊天请求。"""
+    """聊天请求。user_id 由服务器从 JWT Token 中注入（不从客户端接收）。"""
 
-    user_id: str = Field(description="用户 ID")
     chat_id: str = Field(description="会话 ID")
     message: str = Field(description="用户消息内容")
     mode: str = Field(
@@ -57,7 +57,10 @@ class ChatResponse(BaseModel):
 
 
 @router.post("/chat")
-async def chat_stream(req: ChatRequest) -> EventSourceResponse:
+async def chat_stream(
+    req: ChatRequest,
+    user_id: str = Depends(get_current_user_id),
+) -> EventSourceResponse:
     """
     SSE 流式聊天。
 
@@ -91,10 +94,10 @@ async def chat_stream(req: ChatRequest) -> EventSourceResponse:
             else:
                 handler = agent.process_message
 
-            # 启动 agent 处理
+            # 启动 agent 处理（user_id 来自 JWT，非客户端自报）
             task = asyncio.create_task(
                 handler(
-                    user_id=req.user_id,
+                    user_id=user_id,
                     chat_id=req.chat_id,
                     message=req.message,
                     quadrant=req.quadrant,
