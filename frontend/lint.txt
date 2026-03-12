@@ -1,0 +1,40 @@
+
+> frontend@0.1.0 lint
+> eslint
+
+
+D:\project\Cyber_Wingman\frontend\src\app\page.tsx
+   96:5   warning  Unused eslint-disable directive (no problems were reported from 'react-hooks/exhaustive-deps')
+  108:9   warning  The 'messages' logical expression could make the dependencies of useEffect Hook (at line 126) change on every render. To fix this, wrap the initialization of 'messages' in its own useMemo() Hook                                                                                       react-hooks/exhaustive-deps
+  117:9   warning  'setMessages' is assigned a value but never used                                                                                                                                                                                                                                         @typescript-eslint/no-unused-vars
+  501:29  warning  Using `<img>` could result in slower LCP and higher bandwidth. Consider using `<Image />` from `next/image` or a custom image loader to automatically optimize images. This may incur additional usage or cost from your provider. See: https://nextjs.org/docs/messages/no-img-element  @next/next/no-img-element
+  590:21  warning  Using `<img>` could result in slower LCP and higher bandwidth. Consider using `<Image />` from `next/image` or a custom image loader to automatically optimize images. This may incur additional usage or cost from your provider. See: https://nextjs.org/docs/messages/no-img-element  @next/next/no-img-element
+
+D:\project\Cyber_Wingman\frontend\src\components\CollapsibleThinkingPanel.tsx
+   5:23  warning  'Brain' is defined but never used                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             @typescript-eslint/no-unused-vars
+   5:30  warning  'Bot' is defined but never used                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               @typescript-eslint/no-unused-vars
+   5:35  warning  'Wrench' is defined but never used                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            @typescript-eslint/no-unused-vars
+   6:10  warning  'cn' is defined but never used                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                @typescript-eslint/no-unused-vars
+  22:13  error    Error: Calling setState synchronously within an effect can trigger cascading renders
+
+Effects are intended to synchronize state between React and external systems such as manually updating the DOM, state management libraries, or other platform APIs. In general, the body of an effect should do one or both of the following:
+* Update external systems with the latest state from React.
+* Subscribe for updates from some external system, calling setState in a callback function when external state changes.
+
+Calling setState synchronously within an effect body causes cascading renders that can hurt performance, and is not recommended. (https://react.dev/learn/you-might-not-need-an-effect).
+
+D:\project\Cyber_Wingman\frontend\src\components\CollapsibleThinkingPanel.tsx:22:13
+  20 |     useEffect(() => {
+  21 |         if (msg.isDone) {
+> 22 |             setExpanded(false);
+     |             ^^^^^^^^^^^ Avoid calling setState() directly within an effect
+  23 |         } else {
+  24 |             setExpanded(true);
+  25 |         }  react-hooks/set-state-in-effect
+
+D:\project\Cyber_Wingman\frontend\src\components\StreamingText.tsx
+  71:9  warning  Unused eslint-disable directive (no problems were reported from 'react-hooks/exhaustive-deps')
+
+鉁?11 problems (1 error, 10 warnings)
+  0 errors and 2 warnings potentially fixable with the `--fix` option.
+
