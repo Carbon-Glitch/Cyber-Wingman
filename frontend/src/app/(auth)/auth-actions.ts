@@ -2,37 +2,46 @@
 
 import { redirect } from 'next/navigation';
 import { createSupabaseServerClient } from '@/lib/supabase/server';
+import { headers } from 'next/headers';
 
-function getURL(path: string) {
-    const baseUrl = process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000';
+async function getURL(path: string) {
+    let baseUrl = process.env.NEXT_PUBLIC_SITE_URL ?? '';
+    if (!baseUrl) {
+        const headersList = await headers();
+        const host = headersList.get('host') || 'localhost:3000';
+        baseUrl = host.includes('localhost') ? `http://${host}` : `https://${host}`;
+    }
     return `${baseUrl.replace(/\/$/, '')}${path}`;
 }
 
 export async function signInWithOAuth(provider: 'github' | 'google') {
     const supabase = await createSupabaseServerClient();
+    const redirectToUrl = await getURL('/auth/callback');
 
     const { data, error } = await supabase.auth.signInWithOAuth({
         provider,
         options: {
-            redirectTo: getURL('/auth/callback'),
+            redirectTo: redirectToUrl,
         },
     });
 
     if (error) {
-        console.error(error);
+        console.error("signInWithOAuth error:", error);
         return { data: null, error: error.message };
     }
 
-    return redirect(data.url);
+    return { data: { url: data.url }, error: null };
 }
 
 export async function signInWithEmail(email: string) {
     const supabase = await createSupabaseServerClient();
 
+    const redirectToUrl = await getURL('/auth/callback');
+
     const { error } = await supabase.auth.signInWithOtp({
         email,
         options: {
-            emailRedirectTo: getURL('/auth/callback'),
+            emailRedirectTo: redirectToUrl,
         },
     });
 

@@ -14,9 +14,17 @@ export default function LoginPage() {
     async function handleOAuth(provider: 'google' | 'github') {
         setPending(true);
         setError(null);
-        const result = await signInWithOAuth(provider);
-        if (result?.error) {
-            setError('Authentication failed. Please try again.');
+        try {
+            const result = await signInWithOAuth(provider);
+            if (result?.error) {
+                setError('Authentication failed. Please try again.');
+                setPending(false);
+            } else if (result?.data?.url) {
+                window.location.href = result.data.url;
+            }
+        } catch (e) {
+            console.error("handleOAuth error", e);
+            setError('System error. Please try again.');
             setPending(false);
         }
     }
