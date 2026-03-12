@@ -22,9 +22,13 @@ _agent_loop: AgentLoop | None = None
 
 
 def get_agent_loop() -> AgentLoop:
-    """获取 AgentLoop 单例。"""
+    """获取 AgentLoop 单例。降级模式下（未配置 API Key）返回 503。"""
     if _agent_loop is None:
-        raise RuntimeError("AgentLoop 尚未初始化，请确保应用已启动")
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=503,
+            detail="Agent 未初始化：請在 Railway Variables 設定 {NAME}_API_KEY",
+        )
     return _agent_loop
 
 
@@ -38,11 +42,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 发现模型槽位
     model_slots = settings.discover_model_slots()
     if not model_slots:
-        logger.error(
-            "未发现任何模型配置！请在 .env 中配置至少一个 "
-            "{{NAME}}_API_KEY / {{NAME}}_BASE_URL / {{NAME}}_MODEL"
+        # ⚠️ 降级模式：缺少 API Key 时不崩溃，仅记录 WARN
+        # 健康检查仍能通过；chat 端点会返回 503
+        logger.warning(
+            "event=app_startup_degraded reason=no_model_slots "
+            "hint='Set {NAME}_API_KEY in Railway Variables'"
         )
-        raise RuntimeError("未配置任何 LLM 模型槽位")
+        yield
+        logger.info("event=app_shutdown")
+        return
 
     slot_info = [f"{s.name}({s.model})" for s in model_slots]
     logger.info(
@@ -78,6 +86,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # 清理
     logger.info("event=app_shutdown")
+
 
 
 # ── FastAPI App ──────────────────────────────────────────────────
