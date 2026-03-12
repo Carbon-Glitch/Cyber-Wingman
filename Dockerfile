@@ -9,8 +9,8 @@ WORKDIR /app
 # 優先複製依賴清單，利用 Docker cache 層
 COPY pyproject.toml uv.lock ./
 
-# 安裝正式依賴（不含 dev）
-RUN uv sync --frozen --no-dev
+# 安裝正式依賴（不含 dev，且在複製程式碼前不預先安裝專案本身）
+RUN uv sync --frozen --no-dev --no-install-project
 
 # ─── Stage 2: 執行鏡像 ───────────────────────────────────────────
 FROM python:3.12-slim AS runtime
