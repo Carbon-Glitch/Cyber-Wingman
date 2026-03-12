@@ -137,6 +137,7 @@ class ContextBuilder:
         skill_names: list[str] | None = None,
         detected_skills: list[str] | None = None,
         user_id: str | None = None,
+        profile_context: str | None = None,
     ) -> str:
         """
         构建 system prompt — 融合七层 Context。
@@ -146,6 +147,7 @@ class ContextBuilder:
             skill_names: 当前激活的技能名称列表
             detected_skills: 意图检测提前定位的技能（自动内联注入，跳过 load_skill tool）
             user_id: 用户 ID（用于加载用户画像）
+            profile_context: 外部注入的用户画像文本 (优先使用)
         """
         parts: list[str] = []
 
@@ -157,7 +159,9 @@ class ContextBuilder:
         parts.append(quadrant_prompt)
 
         # Layer 1: 用户画像
-        if user_id:
+        if profile_context:
+            parts.append(profile_context)
+        elif user_id:
             profile_ctx = self.profiles.get_profile_context(user_id)
             if profile_ctx:
                 parts.append(profile_ctx)
@@ -240,6 +244,7 @@ class ContextBuilder:
         chat_id: str | None = None,
         media: list[str] | None = None,
         detected_skills: list[str] | None = None,
+        profile_context: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         构建完整的 LLM 消息列表。
@@ -271,6 +276,7 @@ class ContextBuilder:
                     quadrant=quadrant,
                     detected_skills=detected_skills,
                     user_id=user_id,
+                    profile_context=profile_context,
                 ),
             },
             *history,

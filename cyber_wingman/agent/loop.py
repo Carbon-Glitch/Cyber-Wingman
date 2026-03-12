@@ -567,6 +567,7 @@ class AgentLoop:
         media: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
         guest: bool = True,
+        profile_context: str | None = None,
     ) -> str:
         """
         Crew 模式 — 强制执行 Plan→Dispatch→Collect→Synthesize 四阶段流水线。
@@ -805,6 +806,7 @@ class AgentLoop:
             chat_id=chat_id,
             media=media,
             detected_skills=None,
+            profile_context=profile_context,
         )
         all_msgs.append({"role": "assistant", "content": final_content})
         self._save_turn(session, all_msgs, skip=1 + len(history))
@@ -827,6 +829,7 @@ class AgentLoop:
         media: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
         guest: bool = True,
+        profile_context: str | None = None,
     ) -> str:
         """
         Fast 模式 — 单次 LLM 调用，不使用任何 Tools 或 Skills。
@@ -854,6 +857,7 @@ class AgentLoop:
             chat_id=chat_id,
             media=media,
             detected_skills=None,  # Fast 模式不注入 Skills
+            profile_context=profile_context,
         )
 
         try:
@@ -916,6 +920,7 @@ class AgentLoop:
         media: list[str] | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
         guest: bool = True,
+        profile_context: str | None = None,
     ) -> str:
         """
         处理用户消息 — 完整的四阶段循环。
@@ -992,6 +997,7 @@ class AgentLoop:
             chat_id=chat_id,
             media=media,
             detected_skills=detected_skill_names or None,
+            profile_context=profile_context,
         )
 
         # 待领任务提醒：如果有 pending 任务，动态注入提醒段落

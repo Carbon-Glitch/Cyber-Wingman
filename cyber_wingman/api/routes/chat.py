@@ -43,6 +43,7 @@ class ChatRequest(BaseModel):
         default="tactical", description="四象限身份: tactical/strategist/bestie/advisor"
     )
     media: list[str] | None = Field(default=None, description="附件路径列表")
+    profile_context: str | None = Field(default=None, description="外部注入的用户画像上下文")
 
 
 class ChatResponse(BaseModel):
@@ -104,6 +105,7 @@ async def chat_stream(
                     media=req.media,
                     on_progress=on_progress,
                     guest=req.guest,
+                    profile_context=req.profile_context,
                 )
             )
 
@@ -198,6 +200,7 @@ async def chat_sync(
             message=req.message,
             quadrant=req.quadrant,
             media=req.media,
+            profile_context=req.profile_context,
         )
         return ChatResponse(
             reply=reply,
