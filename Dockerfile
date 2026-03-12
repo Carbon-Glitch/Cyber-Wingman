@@ -35,4 +35,4 @@ ENV PATH="/app/.venv/bin:$PATH" \
 EXPOSE 8000
 
 # Railway 會注入 $PORT 環境變數；fallback 為 8000
-CMD uvicorn cyber_wingman.api.app:app --host 0.0.0.0 --port "${PORT:-8000}"
+CMD ["sh", "-c", "uvicorn cyber_wingman.api.app:app --host 0.0.0.0 --port ${PORT:-8000}"]
