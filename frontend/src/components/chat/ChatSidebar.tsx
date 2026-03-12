@@ -30,6 +30,7 @@ interface ChatSidebarProps {
   activeSessionId: string;
   onSwitchSession: (id: string) => void;
   onDeleteSession?: (id: string, e: React.MouseEvent) => void;
+  onOpenSettings?: () => void;
 }
 
 const tools = [
@@ -46,7 +47,8 @@ export function ChatSidebar({
   sessions,
   activeSessionId,
   onSwitchSession,
-  onDeleteSession
+  onDeleteSession,
+  onOpenSettings
 }: ChatSidebarProps) {
   const [activeTool, setActiveTool] = useState<string | null>(null);
   const [expandedTools, setExpandedTools] = useState(true);
@@ -279,7 +281,10 @@ export function ChatSidebar({
             <div className={`w-2 h-2 rounded-full ${getBgClass()} animate-pulse`} />
             <span className="text-[10px] tracking-widest text-neutral-03 uppercase">System Online</span>
           </div>
-          <button className="p-2 rounded-lg hover:bg-white/[0.05] text-neutral-03 hover:text-white transition-colors">
+          <button 
+            onClick={onOpenSettings}
+            className="p-2 rounded-lg hover:bg-white/[0.05] text-neutral-03 hover:text-white transition-colors"
+          >
             <Settings className="w-4 h-4" />
           </button>
         </div>

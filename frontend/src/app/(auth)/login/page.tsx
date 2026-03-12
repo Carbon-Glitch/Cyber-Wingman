@@ -1,16 +1,15 @@
 'use client';
 
 import { useState, type FormEvent } from 'react';
-import { Zap, Mail, Github, Chrome, Loader2, Bot } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { Loader2 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { signInWithEmail, signInWithOAuth } from '../auth-actions';
 
 export default function LoginPage() {
     const [pending, setPending] = useState(false);
     const [emailSent, setEmailSent] = useState(false);
-    const [emailFormOpen, setEmailFormOpen] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [email, setEmail] = useState('');
 
     async function handleOAuth(provider: 'google' | 'github') {
         setPending(true);
@@ -26,8 +25,13 @@ export default function LoginPage() {
         e.preventDefault();
         setPending(true);
         setError(null);
-        const form = e.target as HTMLFormElement;
-        const email = (form['email'] as HTMLInputElement).value;
+        
+        if (!email.trim()) {
+            setError('Email is required');
+            setPending(false);
+            return;
+        }
+
         const result = await signInWithEmail(email);
         if (result?.error) {
             setError('Failed to send magic link. Please try again.');
@@ -38,131 +42,139 @@ export default function LoginPage() {
     }
 
     return (
-        <main className="relative min-h-screen flex items-center justify-center bg-black overflow-hidden">
-            {/* --- Animated grid background --- */}
-            <div className="absolute inset-0 bg-[linear-gradient(rgba(139,92,246,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(139,92,246,0.03)_1px,transparent_1px)] bg-[size:60px_60px] [mask-image:radial-gradient(ellipse_80%_80%_at_50%_50%,black_40%,transparent_100%)]" />
+        <main className="min-h-screen flex items-center justify-center bg-black relative overflow-hidden">
+            {/* Background Effects */}
+            <div className="absolute inset-0 grid-bg opacity-30" />
+            <div className="absolute inset-0 scanline-effect" />
+            
+            {/* Glow Orbs */}
+            <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-purple-600/10 rounded-full blur-[100px]" />
+            <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-pink-600/10 rounded-full blur-[100px]" />
 
-            {/* --- Glow blobs --- */}
-            <div className="absolute top-1/4 left-1/4 w-96 h-96 rounded-full bg-violet-600/10 blur-[120px] pointer-events-none" />
-            <div className="absolute bottom-1/4 right-1/4 w-96 h-96 rounded-full bg-cyan-600/8 blur-[120px] pointer-events-none" />
+            <motion.div 
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.8, ease: "easeOut" }}
+                className="relative z-10 w-full max-w-sm mx-4 bg-gray-950/80 backdrop-blur-2xl rounded-3xl border border-white/10 p-8 shadow-2xl"
+            >
+                {/* Glow top border */}
+                <div className="absolute top-0 left-1/2 -translate-x-1/2 h-px w-1/2 bg-gradient-to-r from-transparent via-cyber-pink to-transparent" />
 
-            {/* --- Card --- */}
-            <div className="relative z-10 w-full max-w-sm mx-4 p-8 rounded-2xl border border-white/10 bg-white/[0.03] backdrop-blur-xl shadow-2xl shadow-black/60">
-
-                {/* Logo + Title */}
-                <div className="flex flex-col items-center gap-3 mb-8">
-                    <div className="relative">
-                        <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-violet-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-violet-500/30">
-                            <Bot size={28} className="text-white" />
-                        </div>
-                        <div className="absolute -top-1 -right-1 w-4 h-4 bg-cyan-400 rounded-full flex items-center justify-center">
-                            <Zap size={9} className="text-black" />
-                        </div>
+                {/* Header */}
+                <div className="flex flex-col items-center mb-8 gap-4">
+                    <div className="relative flex h-16 w-16 items-center justify-center rounded-2xl border border-cyber-pink/40 bg-cyber-pink/10 shadow-[0_0_30px_rgba(255,42,133,0.3)]">
+                        <span className="text-4xl">🔌</span>
+                        <div className="absolute -top-1 -right-1 h-3 w-3 rounded-full bg-cyber-cyan animate-pulse shadow-[0_0_10px_rgba(0,255,255,1)]" />
                     </div>
                     <div className="text-center">
-                        <h1 className="text-lg font-bold text-white tracking-tight">Cyber Wingman</h1>
-                        <p className="text-xs text-white/40 mt-0.5">Your AI-powered dating strategist</p>
+                        <h1 className="text-2xl font-black italic text-white tracking-widest uppercase">
+                            SYSTEM LOGIN
+                        </h1>
+                        <p className="text-sm font-mono text-neutral-03 mt-2 tracking-widest uppercase text-[10px]">
+                            Authenticate to access Wingman AI
+                        </p>
                     </div>
                 </div>
 
-                {/* Success state */}
-                {emailSent ? (
-                    <div className="text-center py-4">
-                        <div className="w-10 h-10 mx-auto mb-3 rounded-full bg-cyan-500/10 flex items-center justify-center">
-                            <Mail size={20} className="text-cyan-400" />
-                        </div>
-                        <p className="text-sm font-medium text-white">Check your inbox</p>
-                        <p className="text-xs text-white/40 mt-1">We sent you a magic link to sign in</p>
-                        <button
-                            onClick={() => setEmailSent(false)}
-                            className="mt-4 text-xs text-violet-400 hover:text-violet-300 transition-colors"
+                <AnimatePresence mode="wait">
+                    {emailSent ? (
+                        <motion.div 
+                            key="success"
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.95 }}
+                            className="text-center py-4"
                         >
-                            Try again
-                        </button>
-                    </div>
-                ) : (
-                    <div className="flex flex-col gap-3">
-                        {/* Google */}
-                        <button
-                            onClick={() => handleOAuth('google')}
-                            disabled={pending}
-                            className="flex items-center justify-center gap-2.5 w-full py-3 rounded-xl bg-white/5 border border-white/10 text-sm font-medium text-white/80 hover:bg-white/10 hover:border-white/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            {pending ? <Loader2 size={16} className="animate-spin" /> : <Chrome size={16} />}
-                            Continue with Google
-                        </button>
-
-                        {/* GitHub */}
-                        <button
-                            onClick={() => handleOAuth('github')}
-                            disabled={pending}
-                            className="flex items-center justify-center gap-2.5 w-full py-3 rounded-xl bg-white/5 border border-white/10 text-sm font-medium text-white/80 hover:bg-white/10 hover:border-white/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            {pending ? <Loader2 size={16} className="animate-spin" /> : <Github size={16} />}
-                            Continue with GitHub
-                        </button>
-
-                        {/* Divider */}
-                        <div className="flex items-center gap-2 my-1">
-                            <div className="flex-1 h-px bg-white/10" />
-                            <span className="text-[10px] text-white/30 uppercase tracking-widest">or</span>
-                            <div className="flex-1 h-px bg-white/10" />
-                        </div>
-
-                        {/* Email */}
-                        {!emailFormOpen ? (
+                            <div className="rounded-xl border border-cyber-cyan/50 bg-cyber-cyan/10 p-5 mb-4">
+                                <p className="text-xs font-mono tracking-widest text-cyber-cyan uppercase leading-relaxed">
+                                    <span className="text-lg block mb-2">✅</span>
+                                    Secure link transmitted.<br/>Check your inbox.
+                                </p>
+                            </div>
                             <button
-                                onClick={() => setEmailFormOpen(true)}
-                                disabled={pending}
-                                className="flex items-center justify-center gap-2.5 w-full py-3 rounded-xl bg-violet-500/10 border border-violet-500/20 text-sm font-medium text-violet-300 hover:bg-violet-500/20 hover:border-violet-500/30 transition-all disabled:opacity-50"
+                                onClick={() => setEmailSent(false)}
+                                className="mt-2 text-[10px] font-mono tracking-[0.2em] text-cyber-pink uppercase hover:opacity-80 transition-all underline decoration-cyber-pink/30 hover:decoration-cyber-pink underline-offset-4"
                             >
-                                <Mail size={16} />
-                                Continue with Email
+                                RETRY CONNECTION
                             </button>
-                        ) : (
-                            <form onSubmit={handleEmailSubmit} className="flex flex-col gap-2">
-                                <Input
-                                    type="email"
-                                    name="email"
-                                    placeholder="Enter your email"
-                                    autoFocus
-                                    required
-                                    className="bg-white/5 border-white/10 text-white placeholder:text-white/30 focus:border-violet-500/50 focus:ring-violet-500/20 rounded-xl"
-                                />
-                                <div className="flex gap-2">
-                                    <Button
-                                        type="button"
-                                        variant="ghost"
-                                        size="sm"
-                                        onClick={() => setEmailFormOpen(false)}
-                                        className="flex-1 text-white/50 hover:text-white/80"
-                                    >
-                                        Cancel
-                                    </Button>
-                                    <Button
-                                        type="submit"
-                                        size="sm"
-                                        disabled={pending}
-                                        className="flex-1 bg-violet-600 hover:bg-violet-500 text-white"
-                                    >
-                                        {pending ? <Loader2 size={14} className="animate-spin" /> : 'Send Link'}
-                                    </Button>
-                                </div>
-                            </form>
-                        )}
+                        </motion.div>
+                    ) : (
+                        <motion.div 
+                            key="form"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            className="flex flex-col"
+                        >
+                            {/* OAuth Login */}
+                            <div className="space-y-4 mb-6">
+                                <button
+                                    onClick={() => handleOAuth('google')}
+                                    disabled={pending}
+                                    className="group relative flex w-full items-center justify-center gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-3.5 text-sm font-medium text-white transition-all hover:bg-white/10 overflow-hidden disabled:opacity-50"
+                                >
+                                    <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+                                    {pending ? <Loader2 size={16} className="animate-spin" /> : (
+                                        <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none">
+                                            <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4" />
+                                            <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+                                            <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+                                            <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+                                        </svg>
+                                    )}
+                                    Authenticate via Google
+                                </button>
+                                {/* Note: Removing Github button entirely based on previous implicit preference, focusing pure Cyberpunk style */}
+                            </div>
 
-                        {/* Error */}
-                        {error && (
-                            <p className="text-xs text-red-400/80 text-center mt-1">{error}</p>
-                        )}
-                    </div>
-                )}
+                            {/* Divider */}
+                            <div className="flex items-center gap-3 mb-6 opacity-30">
+                                <div className="flex-1 h-px bg-white" />
+                                <span className="text-[10px] font-mono tracking-widest uppercase">OR</span>
+                                <div className="flex-1 h-px bg-white" />
+                            </div>
+
+                            {/* Email Magic Link */}
+                            <form onSubmit={handleEmailSubmit} className="space-y-4">
+                                <div>
+                                    <input
+                                        type="email"
+                                        value={email}
+                                        onChange={(e) => setEmail(e.target.value)}
+                                        placeholder="ENTER E-MAIL ADDRESS"
+                                        required
+                                        className="w-full rounded-xl border border-white/10 bg-black/50 px-4 py-4 text-xs font-mono tracking-widest text-white placeholder-neutral-04 outline-none focus:border-cyber-pink transition-colors"
+                                    />
+                                </div>
+                                {error && <p className="text-[10px] uppercase tracking-wider text-cyber-pink text-center animate-pulse">{error}</p>}
+                                <button
+                                    type="submit"
+                                    disabled={pending}
+                                    className={`
+                                        group relative w-full rounded-xl bg-cyber-pink py-4 text-xs font-black italic tracking-[0.2em] text-black transition-all hover:brightness-110 disabled:opacity-50 overflow-hidden
+                                        ${pending ? 'animate-pulse' : ''}
+                                    `}
+                                >
+                                    <span className="relative z-10 flex items-center justify-center gap-2">
+                                        {pending && <Loader2 size={14} className="animate-spin" />}
+                                        {pending ? 'ESTABLISHING LINK...' : 'SEND SECURE LINK'}
+                                    </span>
+                                    {!pending && <div className="absolute inset-0 bg-white/20 -skew-x-[30deg] -translate-x-[150%] transition-transform duration-700 group-hover:translate-x-[150%]" />}
+                                </button>
+                            </form>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
 
                 {/* Footer */}
-                <p className="text-center text-[10px] text-white/20 mt-6 leading-relaxed">
-                    By continuing you agree to our Terms of Service and Privacy Policy
-                </p>
-            </div>
+                <div className="mt-8 pt-6 border-t border-white/10 text-center">
+                    <p className="text-[9px] font-mono tracking-[0.2em] text-neutral-04 uppercase leading-relaxed">
+                        By authenticating, you accept the<br/>
+                        <span className="text-white">Terms of Protocol</span>
+                    </p>
+                </div>
+            </motion.div>
         </main>
     );
 }
+

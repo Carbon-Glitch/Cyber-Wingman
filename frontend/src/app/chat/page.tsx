@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { createSupabaseBrowserClient } from '@/lib/supabase/client';
-import { LoginModal } from '@/components/LoginModal';
+import { ProfileModal } from '@/components/ProfileModal';
 import { 
   ChatHeader, 
   ChatMessage, 
@@ -135,7 +135,6 @@ export default function ChatPage() {
   const [activeId, setActiveId] = useState<string>(() => sessions[0].id);
   const [sessionToken, setSessionToken] = useState<string | null>(null);
   const [isGuest, setIsGuest] = useState(true);
-  const [showLoginModal, setShowLoginModal] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
   // UI State
@@ -143,16 +142,45 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Initialize Auth & Load Historical Sessions
+  // New states for Profile and Setup
+  const [userId, setUserId] = useState<string | null>(null);
+  const [userProfile, setUserProfile] = useState<any>(null);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [forceSetup, setForceSetup] = useState(false);
+
+  // Initialize Auth, Load Historical Sessions, and Profile
+  const fetchProfile = async (supabaseApp: any, uid: string) => {
+    try {
+      const { data } = await supabaseApp.from('profiles').select('*').eq('id', uid).single();
+      setUserProfile(data || null);
+      if (!data || !data.username || !data.gender || !data.relationship_status) {
+        setForceSetup(true);
+        setShowProfileModal(true);
+      } else {
+        setForceSetup(false);
+        // Optionally auto-close if it was forced
+      }
+    } catch (e) {
+      console.error("Profile check error:", e);
+      setForceSetup(true);
+      setShowProfileModal(true);
+    }
+  };
+
   useEffect(() => {
     async function init() {
       const supabase = createSupabaseBrowserClient();
       const { data } = await supabase.auth.getSession();
       const token = data.session?.access_token;
+      const uid = data.session?.user?.id;
 
-      if (token) {
+      if (token && uid) {
         setSessionToken(token);
+        setUserId(uid);
         setIsGuest(false);
+        
+        await fetchProfile(supabase, uid);
+
         try {
           const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/api/chat/sessions`, {
             headers: { 'Authorization': `Bearer ${token}` }
@@ -174,24 +202,27 @@ export default function ChatPage() {
         } catch (e) {
           console.error('Failed to load sessions', e);
         }
+      } else {
+        // Since we redesigned auth, force them to login if guest
+        // If guest clicks start in home, they go to /login. If they go straight to /chat,
+        // we could let them read demo chats or redirect. Let's redirect if no session.
+        window.location.href = '/login';
       }
     }
     init();
   }, []);
 
-  // Active session derived state
+  // ... (keep auto-scroll and helpers)
   const activeSession = sessions.find(s => s.id === activeId) ?? sessions[0];
   const messages = activeSession?.messages ?? [];
   const mode = activeSession?.mode ?? 'wingman';
   const characterId = activeSession?.characterId ?? 'chiron';
   const character = CHARACTERS[characterId];
 
-  // Auto-scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Helpers
   const updateSession = useCallback((id: string, updater: (s: SessionItem) => SessionItem) => {
     setSessions(prev => prev.map(s => s.id === id ? updater(s) : s));
   }, []);
@@ -203,8 +234,6 @@ export default function ChatPage() {
         : s
     ));
   }, []);
-
-  // ── Session Management ──────────────────────────────────
 
   const createNewSession = () => {
     const s = makeSession({ characterId });
@@ -254,8 +283,6 @@ export default function ChatPage() {
   const setCharacterId = (cid: CharacterId) =>
     updateSession(activeId, s => ({ ...s, characterId: cid }));
 
-  // ── Media Handling ──────────────────────────────────────
-
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -273,13 +300,17 @@ export default function ChatPage() {
     reader.readAsDataURL(file);
   };
 
-  // ── Submit & SSE ────────────────────────────────────────
+  // Convert Profile to context string
+  const getProfileContextString = () => {
+    if (!userProfile) return '';
+    return `User Profile Context => ID/Name: ${userProfile.username}, Gender: ${userProfile.gender}, Status: ${userProfile.relationship_status}, Age: ${userProfile.age || 'N/A'}, Occupation: ${userProfile.occupation || 'N/A'}, MBTI: ${userProfile.mbti || 'N/A'}, Ideal Type: ${userProfile.ideal_type || 'N/A'}, Current Challenge: ${userProfile.current_challenge || 'N/A'}, Goal from AI: ${userProfile.wingman_goal || 'N/A'}, Red Flags/Deal Breakers: ${userProfile.deal_breakers || 'N/A'}`;
+  };
 
   const handleSend = async (inputText: string) => {
     if ((!inputText.trim() && media.length === 0) || isLoading || !activeSession) return;
 
-    if (isGuest) {
-      setShowLoginModal(true);
+    if (forceSetup) {
+      setShowProfileModal(true);
       return;
     }
 
@@ -307,7 +338,6 @@ export default function ChatPage() {
       timestamp: new Date(),
     };
 
-    // Auto-title and add messages
     setSessions(prev => prev.map(s => {
       if (s.id !== capturedSessionId) return s;
       const isFirstUserMsg = s.messages.filter(m => m.role === 'user').length === 0;
@@ -330,6 +360,8 @@ export default function ChatPage() {
         headers['Authorization'] = `Bearer ${sessionToken}`;
       }
 
+      // Appending profile context implicitly via the prompt context field or just prepending it if backend doesn't take context param
+      // Actually backend accepts "context" according to some typical designs, or we can just prepend it. Let's add it to the body request as profile_context.
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL}/api/chat`, {
         method: 'POST',
         headers,
@@ -337,9 +369,10 @@ export default function ChatPage() {
           chat_id: capturedSessionId,
           message: userText,
           mode: capturedMode,
-          guest: isGuest,
+          guest: false,
           quadrant: capturedCharacter,
           media: media.length > 0 ? media : undefined,
+          profile_context: getProfileContextString()
         }),
       });
 
@@ -513,16 +546,12 @@ export default function ChatPage() {
     }
   };
 
-  // ── Render ──────────────────────────────────────────────
-
-  // Convert sessions to ChatSession format for sidebar
   const chatSessions: ChatSession[] = sessions.map(s => ({
     id: s.id,
     title: s.title,
     createdAt: s.createdAt,
   }));
 
-  // Check if any message is still thinking
   const isAnyThinking = messages.some(m => m.role === 'assistant' && m.isThinking);
 
   return (
@@ -538,6 +567,7 @@ export default function ChatPage() {
           activeSessionId={activeId}
           onSwitchSession={switchSession}
           onDeleteSession={deleteSession}
+          onOpenSettings={() => setShowProfileModal(true)}
         />
 
         {/* Main Chat Area */}
@@ -553,7 +583,6 @@ export default function ChatPage() {
             protocolName={character.protocol}
           />
 
-          {/* Character Welcome Banner - shown when no messages */}
           {messages.length === 0 && (
             <div className="flex-shrink-0 py-8 px-6">
               <motion.div
@@ -561,7 +590,6 @@ export default function ChatPage() {
                 animate={{ opacity: 1, y: 0 }}
                 className="flex flex-col items-center"
               >
-                {/* Avatar */}
                 <div className="relative mb-4">
                   <div className={`
                     absolute inset-0 rounded-full blur-2xl opacity-30 animate-pulse
@@ -583,7 +611,6 @@ export default function ChatPage() {
                   </div>
                 </div>
 
-                {/* Name & Title */}
                 <h2 className={`text-2xl font-black italic ${
                   character.color === 'cyan' ? 'text-cyber-cyan' : 
                   character.color === 'amber' ? 'text-cyber-amber' : 
@@ -595,7 +622,6 @@ export default function ChatPage() {
                   {character.title}
                 </p>
 
-                {/* Traits */}
                 <div className="flex gap-2">
                   {character.traits.map((trait, i) => (
                     <span 
@@ -618,7 +644,6 @@ export default function ChatPage() {
             </div>
           )}
 
-          {/* Messages */}
           <div className="flex-1 overflow-y-auto px-4 lg:px-8 pb-4">
             <div className="max-w-3xl mx-auto space-y-6">
               <AnimatePresence mode="popLayout">
@@ -650,7 +675,6 @@ export default function ChatPage() {
             </div>
           </div>
 
-          {/* Input */}
           <div className="flex-shrink-0">
             <ChatInput
               onSend={handleSend}
@@ -673,7 +697,6 @@ export default function ChatPage() {
             />
           </div>
 
-          {/* Footer Branding */}
           <div className="text-center py-3">
             <p className="text-[8px] tracking-[0.4em] font-mono text-neutral-04 uppercase">
               {character.name.toUpperCase()} AI 2.0 // Decrypting Emotion in Real-Time
@@ -682,10 +705,17 @@ export default function ChatPage() {
         </main>
       </div>
 
-      {/* Login Modal */}
-      <LoginModal
-        isOpen={showLoginModal}
-        onClose={() => setShowLoginModal(false)}
+      <ProfileModal
+        isOpen={showProfileModal}
+        onClose={() => setShowProfileModal(false)}
+        sessionToken={sessionToken || ''}
+        userId={userId || ''}
+        forceMandatory={forceSetup}
+        onProfileUpdated={() => {
+            const supabase = createSupabaseBrowserClient();
+            if (userId) fetchProfile(supabase, userId);
+            setShowProfileModal(false);
+        }}
       />
     </>
   );

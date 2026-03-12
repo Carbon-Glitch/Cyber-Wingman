@@ -60,7 +60,7 @@ export function Navbar() {
 
           {/* CTA */}
           <div className="hidden lg:block">
-            <Link href="/chat">
+            <Link href="/login">
               <GlowButton size="sm">
                 Get Started
               </GlowButton>
@@ -99,7 +99,7 @@ export function Navbar() {
             </a>
           ))}
           <div className="pt-4">
-            <Link href="/chat">
+            <Link href="/login">
               <GlowButton className="w-full justify-center">
                 Get Started
               </GlowButton>
