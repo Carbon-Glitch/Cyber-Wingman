@@ -1,0 +1,40 @@
+# Docker build 時排除不需要的文件
+# ── 敏感資料 ──────────────────────────────────────────────────────
+.env
+.env.*
+.env.local
+
+# ── Python 開發產物 ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.log
+
+# ── 測試 & 開發 ───────────────────────────────────────────────────
+tests/
+reference/
+test_*.py
+test_out*.txt
+ruff_output.txt
+
+# ── 前端（後端 Dockerfile 不需要）────────────────────────────────
+frontend/
+node_modules/
+.next/
+
+# ── Git & IDE ──────────────────────────────────────────────────────
+.git/
+.gitignore
+*.md
+docs/
+
+# ── Railway / Agent 本地數據 ──────────────────────────────────────
+workspace/
+memory/
+profiles/
+.tasks/
+skills/
+supabase/
+Kimi_Agent_欧美两性AI UI优化/
